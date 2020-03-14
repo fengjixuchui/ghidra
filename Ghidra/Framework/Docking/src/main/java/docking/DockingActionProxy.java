@@ -118,11 +118,6 @@ public class DockingActionProxy
 	}
 
 	@Override
-	public boolean isValidGlobalContext(ActionContext context) {
-		return dockingAction.isValidGlobalContext(context);
-	}
-
-	@Override
 	public void removePropertyChangeListener(PropertyChangeListener listener) {
 		propertyListeners.remove(listener);
 	}
@@ -200,8 +195,8 @@ public class DockingActionProxy
 	}
 
 	@Override
-	public boolean isKeyBindingManaged() {
-		return dockingAction.isKeyBindingManaged();
+	public KeyBindingType getKeyBindingType() {
+		return dockingAction.getKeyBindingType();
 	}
 
 	@Override
@@ -212,6 +207,11 @@ public class DockingActionProxy
 	@Override
 	public void setUnvalidatedKeyBindingData(KeyBindingData newKeyBindingData) {
 		dockingAction.setUnvalidatedKeyBindingData(newKeyBindingData);
+	}
+
+	@Override
+	public void dispose() {
+		dockingAction.dispose();
 	}
 
 	@Override
@@ -226,6 +226,6 @@ public class DockingActionProxy
 
 	@Override
 	public String toString() {
-		return dockingAction.getName();
+		return dockingAction.toString();
 	}
 }

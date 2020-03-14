@@ -314,7 +314,7 @@ void DecompileAt::rawAction(void)
 	ParamIDAnalysis pidanalysis( fd, false );
 	pidanalysis.saveXml( sout, true );
       }
-      fd->saveXml(sout,ghidra->getSendSyntaxTree());
+      fd->saveXml(sout,0,ghidra->getSendSyntaxTree());
       if (ghidra->getSendCCode()&&
 	  (ghidra->allacts.getCurrentName() == "decompile"))
         ghidra->print->docFunction(fd);
@@ -351,6 +351,7 @@ void StructureGraph::rawAction(void)
   sout.write("\000\000\001\016",4);
   resultgraph.saveXml(sout);
   sout.write("\000\000\001\017",4);
+  ingraph.clear();
 }
 
 void SetAction::loadParameters(void)

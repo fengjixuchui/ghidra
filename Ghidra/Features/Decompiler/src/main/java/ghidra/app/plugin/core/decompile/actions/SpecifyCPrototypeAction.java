@@ -17,12 +17,10 @@ package ghidra.app.plugin.core.decompile.actions;
 
 import java.util.List;
 
-import docking.ActionContext;
-import docking.action.DockingAction;
 import docking.action.MenuData;
 import ghidra.app.decompiler.ClangFuncNameToken;
 import ghidra.app.decompiler.ClangToken;
-import ghidra.app.decompiler.component.*;
+import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
 import ghidra.app.plugin.core.function.editor.*;
 import ghidra.app.services.DataTypeManagerService;
@@ -32,89 +30,13 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.VariableStorage;
 import ghidra.program.model.pcode.*;
 import ghidra.program.model.symbol.SourceType;
-import ghidra.util.Msg;
 import ghidra.util.UndefinedFunction;
 
-public class SpecifyCPrototypeAction extends DockingAction {
-	private final DecompilerController controller;
-	private final PluginTool tool;
-	//private FunctionSignature signature = null;
-	//private String callingConventionName = null;
+public class SpecifyCPrototypeAction extends AbstractDecompilerAction {
 
-	public SpecifyCPrototypeAction(String owner, PluginTool tool, DecompilerController controller) {
-		super("Edit Function Signature", owner);
-		this.tool = tool;
-		this.controller = controller;
+	public SpecifyCPrototypeAction() {
+		super("Edit Function Signature");
 		setPopupMenuData(new MenuData(new String[] { "Edit Function Signature" }, "Decompile"));
-	}
-
-	@Override
-	public boolean isEnabledForContext(ActionContext context) {
-		if (!(context instanceof DecompilerActionContext)) {
-			return false;
-		}
-
-		Function function = controller.getFunction();
-		if (function instanceof UndefinedFunction) {
-			return false;
-		}
-
-		DecompilerActionContext decompilerActionContext = (DecompilerActionContext) context;
-		if (decompilerActionContext.isDecompiling()) {
-			// Let this through here and handle it in actionPerformed().  This lets us alert 
-			// the user that they have to wait until the decompile is finished.  If we are not
-			// enabled at this point, then the keybinding will be propagated to the global 
-			// actions, which is not what we want.
-			return true;
-		}
-
-		return getFunction() != null;
-	}
-
-	@Override
-	public void actionPerformed(ActionContext context) {
-
-		// Note: we intentionally do this check here and not in isEnabledForContext() so 
-		// that global events do not get triggered.
-		DecompilerActionContext decompilerActionContext = (DecompilerActionContext) context;
-		if (decompilerActionContext.isDecompiling()) {
-			Msg.showInfo(getClass(), context.getComponentProvider().getComponent(),
-				"Decompiler Action Blocked",
-				"You cannot perform Decompiler actions while the Decompiler is busy");
-			return;
-		}
-
-		Function function = getFunction();
-		DataTypeManagerService service = tool.getService(DataTypeManagerService.class);
-
-		FunctionEditorModel model = new FunctionEditorModel(service, function);
-
-		HighFunction hf = controller.getHighFunction();
-		FunctionPrototype functionPrototype = hf.getFunctionPrototype();
-
-		// If editing the decompiled function (i.e., not a subfunction) and function
-		// is not fully locked update the model to reflect the decompiled results
-		if (function.getEntryPoint().equals(hf.getFunction().getEntryPoint())) {
-			if (function.getSignatureSource() == SourceType.DEFAULT) {
-				model.setUseCustomizeStorage(false);
-				model.setCallingConventionName(functionPrototype.getModelName());
-				model.setFunctionData(buildSignature(hf));
-				verifyDynamicEditorModel(hf, model);
-			}
-			else if (function.getReturnType() == DataType.DEFAULT) {
-				model.setFormalReturnType(functionPrototype.getReturnType());
-				if (model.canCustomizeStorage()) {
-					model.setReturnStorage(functionPrototype.getReturnStorage());
-				}
-			}
-		}
-
-		// make the model think it is not changed, so if the user doesn't change anything, 
-		// we don't save the changes made above.
-		model.setModelChanged(false);
-
-		FunctionEditorDialog dialog = new FunctionEditorDialog(model);
-		tool.showDialog(dialog, context.getComponentProvider());
 	}
 
 	/**
@@ -206,22 +128,68 @@ public class SpecifyCPrototypeAction extends DockingAction {
 	}
 
 	/**
+	 * @param function is the current function
+	 * @param tokenAtCursor is the user selected token
 	 * @return the currently highlighted function or the currently decompiled
 	 *         function if there isn't one.
 	 */
-	synchronized Function getFunction() {
+	synchronized Function getFunction(Function function, ClangToken tokenAtCursor) {
 		// try to look up the function that is at the current cursor location
 		//   If there isn't one, just use the function we are in.
-		DecompilerPanel decompilerPanel = controller.getDecompilerPanel();
-		ClangToken tokenAtCursor = decompilerPanel.getTokenAtCursor();
-		Function function = controller.getFunction();
 		if (tokenAtCursor instanceof ClangFuncNameToken) {
-			Function tokenFunction = DecompilerUtils.getFunction(controller.getProgram(),
+			Function tokenFunction = DecompilerUtils.getFunction(function.getProgram(),
 				(ClangFuncNameToken) tokenAtCursor);
 			if (tokenFunction != null) {
 				function = tokenFunction;
 			}
 		}
 		return function;
+	}
+
+	@Override
+	protected boolean isEnabledForDecompilerContext(DecompilerActionContext context) {
+		Function function = context.getFunction();
+		if (function instanceof UndefinedFunction) {
+			return false;
+		}
+
+		return getFunction(function, context.getTokenAtCursor()) != null;
+	}
+
+	@Override
+	protected void decompilerActionPerformed(DecompilerActionContext context) {
+		Function function =
+			getFunction(context.getFunction(), context.getTokenAtCursor());
+		PluginTool tool = context.getTool();
+		DataTypeManagerService service = tool.getService(DataTypeManagerService.class);
+
+		FunctionEditorModel model = new FunctionEditorModel(service, function);
+
+		HighFunction hf = context.getHighFunction();
+		FunctionPrototype functionPrototype = hf.getFunctionPrototype();
+
+		// If editing the decompiled function (i.e., not a subfunction) and function
+		// is not fully locked update the model to reflect the decompiled results
+		if (function.getEntryPoint().equals(hf.getFunction().getEntryPoint())) {
+			if (function.getSignatureSource() == SourceType.DEFAULT) {
+				model.setUseCustomizeStorage(false);
+				model.setCallingConventionName(functionPrototype.getModelName());
+				model.setFunctionData(buildSignature(hf));
+				verifyDynamicEditorModel(hf, model);
+			}
+			else if (function.getReturnType() == DataType.DEFAULT) {
+				model.setFormalReturnType(functionPrototype.getReturnType());
+				if (model.canCustomizeStorage()) {
+					model.setReturnStorage(functionPrototype.getReturnStorage());
+				}
+			}
+		}
+
+		// make the model think it is not changed, so if the user doesn't change anything, 
+		// we don't save the changes made above.
+		model.setModelChanged(false);
+
+		FunctionEditorDialog dialog = new FunctionEditorDialog(model);
+		tool.showDialog(dialog, context.getComponentProvider());
 	}
 }

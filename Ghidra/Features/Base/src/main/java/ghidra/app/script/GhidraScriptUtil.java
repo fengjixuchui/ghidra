@@ -147,12 +147,17 @@ public class GhidraScriptUtil {
 
 	/**
 	 * Determine if the specified file is contained within the Ghidra installation.
-	 * @param file - file or directory to check
+	 * @param file file or directory to check
 	 * @return true if file is contained within Ghidra application root.
 	 */
-	public static boolean isSystemFile(ResourceFile file) {
+	private static boolean isSystemFile(ResourceFile file) {
 		try {
 			String filePath = file.getCanonicalPath().replace('\\', '/');
+			if (filePath.startsWith(USER_SCRIPTS_DIR)) {
+				// a script inside of the user scripts dir is not a 'system' script 
+				return false;
+			}
+
 			Collection<ResourceFile> roots = Application.getApplicationRootDirectories();
 			for (ResourceFile resourceFile : roots) {
 				String installPath = resourceFile.getCanonicalPath().replace('\\', '/');
@@ -206,7 +211,9 @@ public class GhidraScriptUtil {
 
 	/**
 	 * Returns the output directory to which the given script file's generated .class file should
-	 * be written.
+	 * be written
+	 * @param scriptFile the script file
+	 * @return the directory
 	 */
 	public static ResourceFile getScriptCompileOutputDirectory(ResourceFile scriptFile) {
 		return new ResourceFile(USER_SCRIPTS_BIN_DIR);
@@ -328,8 +335,10 @@ public class GhidraScriptUtil {
 			//
 			ResourceFile preferredFile = null;
 			for (ResourceFile file : matchingClassFiles) {
-				if (file.getParentFile().getAbsolutePath().equals(
-					GhidraScriptUtil.USER_SCRIPTS_BIN_DIR)) {
+				if (file.getParentFile()
+						.getAbsolutePath()
+						.equals(
+							GhidraScriptUtil.USER_SCRIPTS_BIN_DIR)) {
 					preferredFile = file;
 					break;
 				}
@@ -349,8 +358,9 @@ public class GhidraScriptUtil {
 
 	/**
 	 * Returns the list of directories to which scripts are compiled.
+	 * @return the list
 	 * 
-	 * @see #getScriptCompileOutputDirectory(File)
+	 * @see #getScriptCompileOutputDirectory(ResourceFile)
 	 */
 	public static List<ResourceFile> getScriptBinDirectories() {
 		return Arrays.asList(new ResourceFile(USER_SCRIPTS_BIN_DIR));
@@ -375,11 +385,11 @@ public class GhidraScriptUtil {
 			//    /some/path/Ghidra/Features/Module/ghidra_scripts
 			// 
 			// Desired path:
-			//    /some/path/Ghidra/Features/Module/bin
+			//    /some/path/Ghidra/Features/Module/bin/scripts
 
 			ResourceFile scriptDir = path.getPath();
 			ResourceFile moduleDir = scriptDir.getParentFile();
-			dirs.add(new ResourceFile(moduleDir, BIN_DIR_NAME));
+			dirs.add(new ResourceFile(moduleDir, BIN_DIR_NAME + File.separator + "scripts"));
 		}
 		return dirs;
 	}
@@ -590,7 +600,7 @@ public class GhidraScriptUtil {
 	 * @param name the name of the script
 	 * @return the name as a '.java' file path (with '/'s and not '.'s)
 	 */
-	private static String fixupName(String name) {
+	static String fixupName(String name) {
 		if (name.endsWith(".java")) {
 			name = name.substring(0, name.length() - 5);
 		}
@@ -667,7 +677,7 @@ public class GhidraScriptUtil {
 	 * scripts such that names are unique.  If this method returns a non-null value, then the 
 	 * name given name is taken.
 	 * 
-	 * @param name the name of the script for which to get a ScriptInfo
+	 * @param scriptName the name of the script for which to get a ScriptInfo
 	 * @return a ScriptInfo matching the given name; null if no script by that name is known to
 	 *         the script manager
 	 */
@@ -680,11 +690,13 @@ public class GhidraScriptUtil {
 	}
 
 	/**
-	 * Runs the specified script with the specified state.
+	 * Runs the specified script with the specified state
 	 * 
-	 * @param scriptState  State representing environment variables that the script is able
-	 * 		to access.
-	 * @param script  Script to be run.
+	 * @param scriptState state representing environment variables that the script is able to access
+	 * @param script  Script to be run
+	 * @param writer the writer to which warning and error messages will be written
+	 * @param originator the client class requesting the script run; used for logging
+	 * @param monitor the task monitor
 	 * @return  whether the script successfully completed running
 	 */
 	public static boolean runScript(GhidraState scriptState, GhidraScript script,

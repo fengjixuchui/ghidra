@@ -15,13 +15,13 @@
  */
 package generic.test;
 
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 import java.io.File;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -325,6 +325,21 @@ public abstract class AbstractGTest {
 		return testName.getMethodName();
 	}
 
+	/**
+	 * Friendly way to create an array of bytes with static values.
+	 * 
+	 * @param unsignedBytes var-args list of unsigned byte values (ie. 0..255)
+	 * @return array of bytes
+	 */
+	public static byte[] bytes(int... unsignedBytes) {
+		byte[] result = new byte[unsignedBytes.length];
+		for (int i = 0; i < unsignedBytes.length; i++) {
+			result[i] = (byte) unsignedBytes[i];
+		}
+		return result;
+	}
+
+
 //==================================================================================================
 // Wait Methods
 //==================================================================================================
@@ -361,6 +376,17 @@ public abstract class AbstractGTest {
 	}
 
 	/**
+	 * Waits for the given AtomicBoolean to return true.  This is a convenience method for 
+	 * {@link #waitFor(BooleanSupplier)}.
+	 *
+	 * @param ab the atomic boolean
+	 * @throws AssertionFailedError if the condition is not met within the timeout period
+	 */
+	public static void waitFor(AtomicBoolean ab) throws AssertionFailedError {
+		waitForCondition(() -> ab.get());
+	}
+
+	/**
 	 * Waits for the given condition to return true
 	 *
 	 * @param condition the condition that returns true when satisfied
@@ -394,6 +420,20 @@ public abstract class AbstractGTest {
 	}
 
 	/**
+	 * Waits for the given condition to return true
+	 *
+	 * @param condition the condition that returns true when satisfied
+	 * @param failureMessageSupplier the function that will supply the failure message in the
+	 *        event of a timeout.
+	 * @throws AssertionFailedError if the condition is not met within the timeout period
+	 */
+	public static void waitForCondition(BooleanSupplier condition,
+			Supplier<String> failureMessageSupplier) throws AssertionFailedError {
+
+		waitForCondition(condition, true /*failOnTimeout*/, failureMessageSupplier);
+	}
+
+	/**
 	 * Waits for the given condition to return true.  Most of the <code>waitForCondition()</code>
 	 * methods throw an {@link AssertionFailedError} if the timeout period expires.
 	 *  This method allows you to setup a longer wait period by repeatedly calling this method.
@@ -403,11 +443,17 @@ public abstract class AbstractGTest {
 	 * @param supplier the supplier that returns true when satisfied
 	 */
 	public static void waitForConditionWithoutFailing(BooleanSupplier supplier) {
-		waitForCondition(supplier, false /*failOnTimeout*/, null /*failure message*/);
+		waitForCondition(supplier, false /*failOnTimeout*/, () -> null /*failure message*/);
 	}
 
 	private static void waitForCondition(BooleanSupplier condition, boolean failOnTimeout,
 			String failureMessage) throws AssertionFailedError {
+
+		waitForCondition(condition, failOnTimeout, () -> failureMessage);
+	}
+
+	private static void waitForCondition(BooleanSupplier condition, boolean failOnTimeout,
+			Supplier<String> failureMessageSupplier) throws AssertionFailedError {
 
 		int totalTime = 0;
 		while (totalTime <= DEFAULT_WAIT_TIMEOUT) {
@@ -423,8 +469,12 @@ public abstract class AbstractGTest {
 			return;
 		}
 
-		String error = failureMessage != null ? failureMessage : "Timed-out waiting for condition";
-		throw new AssertionFailedError(error);
+		String failureMessage = "Timed-out waiting for condition";
+		if (failureMessageSupplier != null) {
+			failureMessage = failureMessageSupplier.get();
+		}
+
+		throw new AssertionFailedError(failureMessage);
 	}
 
 	/**

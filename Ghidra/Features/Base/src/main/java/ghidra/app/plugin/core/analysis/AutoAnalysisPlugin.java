@@ -21,12 +21,13 @@ import javax.swing.SwingUtilities;
 
 import docking.ActionContext;
 import docking.DockingWindowManager;
-import docking.action.*;
+import docking.action.DockingAction;
+import docking.action.MenuData;
+import docking.action.builder.ActionBuilder;
 import docking.widgets.dialogs.MultiLineMessageDialog;
 import ghidra.GhidraOptions;
 import ghidra.app.CorePluginPackage;
 import ghidra.app.context.ListingActionContext;
-import ghidra.app.context.ListingContextAction;
 import ghidra.app.events.*;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.services.Analyzer;
@@ -84,12 +85,11 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 		// get the option so that an owner is associated with it, otherwise
 		// it will not show up in the Options dialog for the tool.
 		Options options = tool.getOptions(GhidraOptions.CATEGORY_AUTO_ANALYSIS);
-		String description =
-			"This option forces the analysis options"
-				+ " dialog to appear whenever auto-analysis action is invoked.";
+		String description = "This option forces the analysis options" +
+			" dialog to appear whenever auto-analysis action is invoked.";
 
 		helpLocation = new HelpLocation("AutoAnalysisPlugin", "AnalysisOptions");
-
+		options.setOptionsHelpLocation(helpLocation);
 		options.registerOption(SHOW_ANALYSIS_OPTIONS, true, helpLocation, description);
 	}
 
@@ -108,51 +108,55 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 		// use this index to make sure that the following actions are ordered in the way that 
 		// they are inserted
 		int subGroupIndex = 0;
+		
+		autoAnalyzeAction = new ActionBuilder("Auto Analyze", getName())
+				.menuPath("&Analysis", "&Auto Analyze...")
+				.menuGroup(ANALYZE_GROUP_NAME, "" + subGroupIndex++)
+				.keyBinding("A")
+				.onAction(this::analyzeCallback)
+				.enabledWhen(this::canAnalyze)
+				.buildAndInstall(tool);
 
-		autoAnalyzeAction = new ListingContextAction("Auto Analyze", getName()) {
-			@Override
-			protected void actionPerformed(ListingActionContext programContext) {
-				analyzeCallback(programContext.getProgram(), programContext.getSelection());
-			}
-
-			@Override
-			public boolean isEnabledForContext(ListingActionContext context) {
-				Program program = context.getProgram();
-				getMenuBarData().setMenuItemName(
-					"&Auto Analyze '" + program.getDomainFile().getName() + "'...");
-				return true;
-			}
-		};
-		String[] menuPath = { "&Analysis", "&Auto Analyze..." };
-		MenuData menuData = new MenuData(menuPath, null, ANALYZE_GROUP_NAME);
-		menuData.setMenuSubGroup("" + subGroupIndex++);
-		autoAnalyzeAction.setMenuBarData(menuData);
-
-		autoAnalyzeAction.setKeyBindingData(new KeyBindingData('A', 0));
-
-		tool.addAction(autoAnalyzeAction);
-
-		analyzeAllAction = new DockingAction("Analyze All Open", getName()) {
-			@Override
-			public void actionPerformed(ActionContext context) {
-				analyzeAllCallback();
-			}
-
-			@Override
-			public boolean isEnabledForContext(ActionContext context) {
-				return context.getContextObject() instanceof ListingActionContext;
-			}
-		};
-		analyzeAllAction.setEnabled(false);
-		menuData =
-			new MenuData(new String[] { "&Analysis", "Analyze All &Open..." }, ANALYZE_GROUP_NAME);
-		menuData.setMenuSubGroup("" + subGroupIndex++);
-		analyzeAllAction.setMenuBarData(menuData);
-
-		tool.addAction(analyzeAllAction);
+		analyzeAllAction = new ActionBuilder("Analyze All Open", getName())
+				.menuPath("&Analysis", "Analyze All &Open...")
+				.menuGroup(ANALYZE_GROUP_NAME, "" + subGroupIndex++)
+				.onAction(c -> analyzeAllCallback())
+				.enabledWhen(c -> getListingContext(c) != null)
+				.buildAndInstall(tool);
 
 		tool.setMenuGroup(new String[] { "Analysis", "One Shot" }, ANALYZE_GROUP_NAME);
 
+	}
+
+	private boolean canAnalyze(ActionContext context) {
+		ListingActionContext listingContext = getListingContext(context);
+		updateActionName(listingContext);
+		return listingContext != null;
+	}
+
+	private void updateActionName(ListingActionContext listingContext) {
+		String programName = "";
+		if (listingContext != null) {
+			programName = listingContext.getProgram().getDomainFile().getName();
+		}
+		MenuData menuBarData = autoAnalyzeAction.getMenuBarData();
+		menuBarData.setMenuItemName("&Auto Analyze '" + programName + "'...");
+	}
+
+	private ListingActionContext getListingContext(ActionContext context) {
+		if (context instanceof ListingActionContext) {
+			return (ListingActionContext) context;
+		}
+		ActionContext globalContext = context.getGlobalContext();
+		if (globalContext instanceof ListingActionContext) {
+			return (ListingActionContext) globalContext;
+		}
+		return null;
+	}
+
+	private void analyzeCallback(ActionContext context) {
+		ListingActionContext listingContext = getListingContext(context);
+		analyzeCallback(listingContext.getProgram(), listingContext.getSelection());
 	}
 
 	private void addOneShotActions(Program program) {
@@ -266,8 +270,8 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 
 		Options options = program.getOptions(Program.ANALYSIS_PROPERTIES);
 		options.registerOptionsEditor(new AnalysisOptionsEditor(program));
-		options.setOptionsHelpLocation(new HelpLocation("AutoAnalysisPlugin",
-			"Auto_Analysis_Option"));
+		options.setOptionsHelpLocation(
+			new HelpLocation("AutoAnalysisPlugin", "Auto_Analysis_Option"));
 	}
 
 	private void programActivated(final Program program) {
@@ -316,15 +320,14 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 	public void analysisEnded(AutoAnalysisManager manager) {
 		MessageLog log = manager.getMessageLog();
 		if (log.getMsgCount() > 0) {
-			MultiLineMessageDialog dialog =
-				new MultiLineMessageDialog("Auto Analysis Summary",
-					"There were warnings/errors issued during analysis.", log.toString(),
+			MultiLineMessageDialog dialog = new MultiLineMessageDialog("Auto Analysis Summary",
+				"There were warnings/errors issued during analysis.", log.toString(),
 				MultiLineMessageDialog.WARNING_MESSAGE, false);//modal?
 			DockingWindowManager.showDialog(null, dialog);
 		}
 	}
 
-	class OneShotAnalyzerAction extends ListingContextAction {
+	class OneShotAnalyzerAction extends DockingAction {
 		private Analyzer analyzer;
 		private Program canAnalyzeProgram;
 		private boolean canAnalyze;
@@ -332,16 +335,16 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 		public OneShotAnalyzerAction(Analyzer analyzer) {
 			super(analyzer.getName(), AutoAnalysisPlugin.this.getName());
 			this.analyzer = analyzer;
-			setMenuBarData(new MenuData(
-				new String[] { "Analysis", "One Shot", analyzer.getName() }, null,
-				ANALYZE_GROUP_NAME));
+			setMenuBarData(new MenuData(new String[] { "Analysis", "One Shot", analyzer.getName() },
+				null, ANALYZE_GROUP_NAME));
 			setHelpLocation(new HelpLocation("AutoAnalysisPlugin", "Auto_Analyzers"));
 
 			setEnabled(false);
 		}
 
 		@Override
-		public void actionPerformed(ListingActionContext programContext) {
+		public void actionPerformed(ActionContext context) {
+			ListingActionContext programContext = getListingContext(context);
 			AddressSetView set;
 			if (programContext.hasSelection()) {
 				set = programContext.getSelection();
@@ -366,7 +369,8 @@ public class AutoAnalysisPlugin extends Plugin implements AutoAnalysisManagerLis
 		}
 
 		@Override
-		protected boolean isEnabledForContext(ListingActionContext programContext) {
+		public boolean isEnabledForContext(ActionContext context) {
+			ListingActionContext programContext = getListingContext(context);
 			Program p = programContext.getProgram();
 			if (p != canAnalyzeProgram) {
 				canAnalyzeProgram = p;

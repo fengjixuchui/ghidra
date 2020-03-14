@@ -42,6 +42,26 @@ public class ImageUtils {
 	}
 
 	/**
+	 * Creates an image of the given component
+	 * 
+	 * @param c the component
+	 * @return the image
+	 */
+	public static Image createImage(Component c) {
+
+		// prevent this from being called when the user has made the window too small to work
+		Rectangle bounds = c.getBounds();
+		int w = Math.max(bounds.width, 1);
+		int h = Math.max(bounds.height, 1);
+
+		BufferedImage bufferedImage = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+		Graphics g = bufferedImage.getGraphics();
+		c.paint(g);
+		g.dispose();
+		return bufferedImage;
+	}
+
+	/**
 	 * Pads the given image with space in the amount given.
 	 * 
 	 * @param i the image to pad
@@ -249,7 +269,7 @@ public class ImageUtils {
 	}
 
 	/**
-	 * Writes the given icon out to the file denoted by <tt>filename</tt> <b> in the PNG format</b>.
+	 * Writes the given icon out to the file denoted by <code>filename</code> <b> in the PNG format</b>.
 	 * 
 	 * @param icon the icon to write
 	 * @param filename the filename denoting the write destination
@@ -392,13 +412,13 @@ public class ImageUtils {
 
 	/**
 	 * Takes in RGB pixel data and then converts the pixel into a gray color with a brightness
-	 * based upon <tt>brightnessPercent</tt>.
+	 * based upon <code>brightnessPercent</code>.
 	 *  
 	 * @param rgbPixels The RGB pixel data for a given pixel.
 	 * @param destination The converted pixel data.
 	 * @param brightnessPercent The amount of brightness to include in the gray value, where 100
 	 *        percent is the brightest possible value.
-	 * @return The <tt>destination</tt> array filled with the new pixel data.
+	 * @return The <code>destination</code> array filled with the new pixel data.
 	 */
 	private static int[] filterRgbDisabledImage(int[] rgbPixels, int[] destination,
 			int brightnessPercent) {

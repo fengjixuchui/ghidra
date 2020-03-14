@@ -72,6 +72,10 @@ public class WindowActionManager {
 		}
 	}
 
+	public DockingActionIf getToolbarAction(String actionName) {
+		return toolBarMgr.getAction(actionName);
+	}
+
 	public void update() {
 		JMenuBar menuBar = menuBarMgr.getMenuBar();
 		if (menuBar.getMenuCount() > 0) {
@@ -92,14 +96,18 @@ public class WindowActionManager {
 		toolBarMgr.dispose();
 	}
 
-	/**
-	 * Notifies the window manager that an action context update is needed.
-	 */
 	synchronized void contextChanged(ComponentPlaceholder placeHolder) {
+
+		if (!node.isVisible()) {
+			return;
+		}
+
 		placeHolderForScheduledActionUpdate = placeHolder;
 
-		// Buffer the events, as they tend to come in 3s.  That might not sound like alot, but 
-		// when you have hundreds of actions, it adds up.
+		// Typically, when we get one contextChanged, we get a flurry of contextChanged calls.
+		// In order to make the action updating be as responsive as possible and still be complete,
+		// we have chosen a policy that will reduce a flurry of contextChanged call into two
+		// actual calls - one that occurs immediately and one when the flurry times out.
 		updateManager.updateLater();
 	}
 
@@ -115,7 +123,6 @@ public class WindowActionManager {
 		ComponentProvider provider = placeHolderForScheduledActionUpdate == null ? null
 				: placeHolderForScheduledActionUpdate.getProvider();
 		ActionContext localContext = provider == null ? null : provider.getActionContext(null);
-		ActionContext globalContext = winMgr.getGlobalContext();
 		if (localContext == null) {
 			localContext = new ActionContext();
 		}
@@ -125,9 +132,6 @@ public class WindowActionManager {
 		for (DockingActionIf action : list) {
 			if (action.isValidContext(localContext)) {
 				action.setEnabled(action.isEnabledForContext(localContext));
-			}
-			else if (action.isValidGlobalContext(globalContext)) {
-				action.setEnabled(action.isEnabledForContext(globalContext));
 			}
 			else {
 				action.setEnabled(false);

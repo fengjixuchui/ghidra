@@ -40,7 +40,7 @@ import utility.module.ModuleUtilities;
  * General resource management class that provides a convenient
  * way of accessing external resources used in Ghidra.
  * <p>
- * <a name="safe"></a>
+ * <a id="safe"></a>
  * There is a known problem with Java's {@link MediaTracker} that can cause deadlocks.  The various
  * methods of this class that create {@link ImageIcon}s will do so by loading image bytes directly,
  * as opposed to using the flawed constructor {@link ImageIcon#ImageIcon(Image)}.
@@ -96,7 +96,7 @@ public class ResourceManager {
 			return is;
 		}
 
-		URL url = getResource(testSearchPaths, filename);
+		URL url = getResource(getTestSearchPaths(), filename);
 		if (url == null) {
 			return null;
 		}
@@ -158,10 +158,10 @@ public class ResourceManager {
 	}
 
 	/**
-	 * Search the classpath for files in the &lt;classpath entry&gt;/<tt>dirName</tt> 
-	 * location that have the given extension.  In <tt>null</tt> is passed for the 
+	 * Search the classpath for files in the &lt;classpath entry&gt;/<code>dirName</code> 
+	 * location that have the given extension.  In <code>null</code> is passed for the 
 	 * extension, then all files found in the given dir names will be returned.  In this 
-	 * way, <tt>null</tt> is a wildcard.
+	 * way, <code>null</code> is a wildcard.
 	 *
 	 * <P>This method differs from {@link #getResource(String)} in that this method finds 
 	 * multiple matches.
@@ -181,10 +181,10 @@ public class ResourceManager {
 	}
 
 	/**
-	 * Search the classpath for files in the &lt;classpath entry&gt;/<tt>dirName</tt> 
-	 * location that have the given extension.  In <tt>null</tt> is passed for the 
+	 * Search the classpath for files in the &lt;classpath entry&gt;/<code>dirName</code> 
+	 * location that have the given extension.  In <code>null</code> is passed for the 
 	 * extension, then all files found in the given dir names will be returned.  In this 
-	 * way, <tt>null</tt> is a wildcard.
+	 * way, <code>null</code> is a wildcard.
 	 *
 	 * <P>The names returned from this method are relative and are meant to be used in a 
 	 * later callback to this class for methods such as {@link #loadImage(String)} or
@@ -371,7 +371,7 @@ public class ResourceManager {
 	}
 
 	/**
-	 * Creates an image icon from the given image.  This method will create an <tt>ImageIcon</tt>
+	 * Creates an image icon from the given image.  This method will create an <code>ImageIcon</code>
 	 * the <a href="safe">"safe"</a> way by avoiding the constructor 
 	 * {@link ImageIcon#ImageIcon(Image)}, which can
 	 * trigger problems with Java's {@link MediaTracker}.
@@ -474,7 +474,9 @@ public class ResourceManager {
 	}
 
 	/**
-	 * Load the image specified by filename; returns null if problems occur trying to load the file
+	 * Load the image specified by filename; returns the default bomb icon
+	 * if problems occur trying to load the file.
+	 * <p>
 	 * 
 	 * @param filename name of file to load, e.g., "images/home.gif"
 	 * @return the image icon stored in the bytes
@@ -507,6 +509,22 @@ public class ResourceManager {
 		}
 
 		return getDefaultIcon();
+	}
+
+	/**
+	 * Load the images specified by filenames; substitutes the default bomb icon
+	 * if problems occur trying to load an individual file.
+	 * <p>
+	 * @param filenames vararg list of string filenames (ie. "images/home.gif")
+	 * @return list of ImageIcons with each image, problem / missing images replaced with
+	 * the default icon.
+	 */
+	public static List<ImageIcon> loadImages(String... filenames) {
+		List<ImageIcon> results = new ArrayList<>(filenames.length);
+		for (String filename : filenames) {
+			results.add(loadImage(filename));
+		}
+		return results;
 	}
 
 	/**

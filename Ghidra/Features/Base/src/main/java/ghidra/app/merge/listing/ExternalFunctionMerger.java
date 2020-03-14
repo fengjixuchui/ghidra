@@ -191,14 +191,8 @@ public class ExternalFunctionMerger extends AbstractFunctionMerger implements Li
 	/**
 	 * Manages changes and conflicts for externals between the latest versioned
 	 * program and the modified program being checked into version control.
-	 * @param mergeManager the top level merge manager for merging a program version.
-	 * @param resultPgm the program to be updated with the result of the merge.
-	 * This is the program that will actually get checked in.
-	 * @param originalPgm the program that was checked out.
-	 * @param latestPgm the latest checked-in version of the program.
-	 * @param myPgm the program requesting to be checked in.
-	 * @param latestChanges the address set of changes between original and latest versioned program.
-	 * @param myChanges the address set of changes between original and my modified program.
+	 * @param listingMergeManager the top level merge manager for merging a program version.
+	 * @param showListingPanel true to show the listing panel.
 	 */
 	public ExternalFunctionMerger(ListingMergeManager listingMergeManager,
 			boolean showListingPanel) {
@@ -255,7 +249,7 @@ public class ExternalFunctionMerger extends AbstractFunctionMerger implements Li
 			}
 			SymbolType symbolType = symbol.getSymbolType();
 			if (symbol.isExternal() &&
-				(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.CODE)) {
+				(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.LABEL)) {
 
 				externalAddSet.add(symbolID);
 			}
@@ -274,14 +268,14 @@ public class ExternalFunctionMerger extends AbstractFunctionMerger implements Li
 				}
 				SymbolType symbolType = originalSymbol.getSymbolType();
 				if (originalSymbol.isExternal() &&
-					(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.CODE)) {
+					(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.LABEL)) {
 					externalRemoveSet.add(symbolID);
 				}
 				continue;
 			}
 			SymbolType symbolType = symbol.getSymbolType();
 			if (symbol.isExternal() &&
-				(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.CODE)) {
+				(symbolType == SymbolType.FUNCTION || symbolType == SymbolType.LABEL)) {
 				externalModifySet.add(symbolID);
 			}
 		}
@@ -1565,7 +1559,7 @@ public class ExternalFunctionMerger extends AbstractFunctionMerger implements Li
 			if (latestSymbol != null) {
 				// We have a possible matching external from LATEST.
 				SymbolType symbolType = latestSymbol.getSymbolType();
-				if (symbolType == SymbolType.CODE || symbolType == SymbolType.FUNCTION) {
+				if (symbolType == SymbolType.LABEL || symbolType == SymbolType.FUNCTION) {
 					latestExternalLocation =
 						externalManagers[LATEST].getExternalLocation(latestSymbol);
 				}

@@ -132,7 +132,7 @@ public class DataTypeWriter {
 
 	/**
 	 * Converts all data types in the data type manager into ANSI-C code. 
-	 * @param writer to writer to write the ANSI-C code
+	 * @param dataTypeManager the manager containing the data types to write
 	 * @param monitor the task monitor
 	 * @throws IOException if an I/O error occurs when writing the data types to the specified writer
 	 * @throws CancelledException 
@@ -144,7 +144,7 @@ public class DataTypeWriter {
 
 	/**
 	 * Converts all data types in the category into ANSI-C code. 
-	 * @param writer to writer to write the ANSI-C code
+	 * @param category the category containing the datatypes to write
 	 * @param monitor the task monitor
 	 * @throws IOException if an I/O error occurs when writing the data types to the specified writer
 	 * @throws CancelledException 
@@ -165,7 +165,7 @@ public class DataTypeWriter {
 
 	/**
 	 * Converts all data types in the array into ANSI-C code. 
-	 * @param writer to writer to write the C code
+	 * @param dataTypes the data types to write
 	 * @param monitor the task monitor
 	 * @throws IOException if an I/O error occurs when writing the data types to the specified writer
 	 * @throws CancelledException 
@@ -183,7 +183,7 @@ public class DataTypeWriter {
 
 	/**
 	 * Converts all data types in the list into ANSI-C code. 
-	 * @param writer to writer to write the ANSI-C code
+	 * @param dataTypes the data types to write
 	 * @param monitor the task monitor
 	 * @throws IOException if an I/O error occurs when writing the data types to the specified writer
 	 * @throws CancelledException 
@@ -240,9 +240,9 @@ public class DataTypeWriter {
 			if (throwExceptionOnInvalidType) {
 				throw iae;
 			}
-			Msg.error(this, "Factory data types may not be written - type: " + dt, iae);
+			Msg.error(this, "Factory data types may not be written - type: " + dt);
 		}
-		if (dt instanceof Pointer || dt instanceof Array) {
+		if (dt instanceof Pointer || dt instanceof Array || dt instanceof BitFieldDataType) {
 			write(getBaseDataType(dt), monitor);
 			return;
 		}
@@ -307,6 +307,9 @@ public class DataTypeWriter {
 		}
 		else if (dt instanceof BuiltInDataType) {
 			writeBuiltIn((BuiltInDataType) dt, monitor);
+		}
+		else if (dt instanceof BitFieldDataType) {
+			// skip
 		}
 		else {
 			writer.write(EOL);
@@ -540,7 +543,12 @@ public class DataTypeWriter {
 
 		if (componentString == null) {
 
-			if (dataType instanceof Array) {
+			if (dataType instanceof BitFieldDataType) {
+				BitFieldDataType bfDt = (BitFieldDataType) dataType;
+				name += ":" + bfDt.getDeclaredBitSize();
+				dataType = bfDt.getBaseDataType();
+			}
+			else if (dataType instanceof Array) {
 				Array array = (Array) dataType;
 				name += getArrayDimensions(array);
 				dataType = getArrayBaseType(array);
@@ -637,6 +645,7 @@ public class DataTypeWriter {
 					return;
 				}
 			}
+			// TODO: A comment explaining the special 'P' case would be helpful!!  Smells like fish.
 			else if (baseType instanceof Pointer && typedefName.startsWith("P")) {
 				DataType dt = ((Pointer) baseType).getDataType();
 				if (dt instanceof TypeDef) {
@@ -764,6 +773,10 @@ public class DataTypeWriter {
 			else if (dt instanceof Pointer) {
 				Pointer pointer = (Pointer) dt;
 				dt = pointer.getDataType();
+			}
+			else if (dt instanceof BitFieldDataType) {
+				BitFieldDataType bitfieldDt = (BitFieldDataType) dt;
+				dt = bitfieldDt.getBaseDataType();
 			}
 			else {
 				break;

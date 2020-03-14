@@ -49,11 +49,15 @@ public class ApplyFunctionDataTypesCmd extends BackgroundCommand {
 	 * Constructs a new command to apply all function signature data types
 	 * in the given data type manager.
 	 * 
-	 * @param dtm data type manager containing the function signature data types
+	 * @param managers list of data type managers containing the function signature data types
 	 * @param set set of addresses containing labels to match against function names.
 	 * 			  The addresses must not already be included in the body of any existing function.
 	 *  		  If null, all symbols will be processed
-	 * @param source the source of this command
+	 * @param source the source of this command.
+	 * @param alwaysReplace true to always replace the existing function signature with the
+	 * 						function signature data type.
+	 * @param createBookmarksEnabled true to create a bookmark when a function signature
+	 * 								 has been applied.
 	 */
 	public ApplyFunctionDataTypesCmd(List<DataTypeManager> managers, AddressSetView set,
 			SourceType source, boolean alwaysReplace, boolean createBookmarksEnabled) {
@@ -90,7 +94,7 @@ public class ApplyFunctionDataTypesCmd extends BackgroundCommand {
 		}
 		else {
 			getSymbols(symbolMap, symbolTable.getSymbols(addresses, SymbolType.FUNCTION, true));
-			getSymbols(symbolMap, symbolTable.getSymbols(addresses, SymbolType.CODE, true));
+			getSymbols(symbolMap, symbolTable.getSymbols(addresses, SymbolType.LABEL, true));
 		}
 		return symbolMap;
 	}
@@ -192,7 +196,7 @@ public class ApplyFunctionDataTypesCmd extends BackgroundCommand {
 	private void checkDoApplyFunctionDefinition(TaskMonitor monitor, String functionName,
 			FunctionDefinition fdef, Symbol sym) {
 
-		monitor.setMessage("Apply Function Signaure '" + functionName + "'");
+		monitor.setMessage("Apply Function Signature '" + functionName + "'");
 
 		// function
 		//    maybe change its signature

@@ -58,6 +58,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	static final int FUNCTION_DEF = 6;
 	static final int PARAMETER = 7;
 	static final int ENUM = 8;
+	static final int BITFIELD = 9; // see BitFieldDataType - used for encoding only (no table)
+
+	static final int DATA_TYPE_KIND_SHIFT = 56;
 
 	private BuiltinDBAdapter builtinAdapter;
 	private ComponentDBAdapter componentAdapter;
@@ -246,8 +249,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * Constructor
 	 * @param handle database handle
 	 * @param addrMap map to convert addresses to longs and longs to addresses
-	 * @param createTables true if tables should be created
-	 * @param rootCategoryName name of the root category
+	 * @param openMode mode to open the DataTypeManager in
+	 * @param errHandler the error handler
+	 * @param lock database lock
+	 * @param monitor the current task monitor
 	 */
 	protected DataTypeManagerDB(DBHandle handle, AddressMap addrMap, int openMode,
 			ErrorHandler errHandler, Lock lock, TaskMonitor monitor)
@@ -417,6 +422,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				DataTypeComponent[] comps = ((Composite) dt).getComponents();
 				for (DataTypeComponent comp : comps) {
 					comp.getDataType().addParent(dt);
+				}
+				if (dt instanceof Structure) {
+					Structure struct = (Structure) dt;
+					if (struct.hasFlexibleArrayComponent()) {
+						struct.getFlexibleArrayComponent().getDataType().addParent(dt);
+					}
 				}
 			}
 			else if (dt instanceof FunctionDefinition) {
@@ -695,6 +706,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (dataType == DataType.DEFAULT) {
 			return dataType;
 		}
+		if (dataType instanceof BitFieldDataType) {
+			return resolveBitFieldDataType((BitFieldDataType) dataType, handler);
+		}
 		lock.acquire();
 		DataTypeConflictHandler originalHandler = null;
 		try {
@@ -755,6 +769,35 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			renameToUnusedConflictName(existingDataType);
 		}
 		return createDataType(dataType, BuiltInSourceArchive.INSTANCE);
+	}
+
+	private DataType resolveBitFieldDataType(BitFieldDataType bitFieldDataType,
+			DataTypeConflictHandler handler) {
+
+		// NOTE: When a bit-field is getting added it will get resolved more than once.
+		// The first time we will ensure that the base data type, which may be a TypeDef, gets
+		// resolved.  If the bit-offset is too large it will be set to 0
+		// with the expectation that it will get corrected during subsequent packing.
+		DataType baseDt = bitFieldDataType.getBaseDataType();
+		DataType resolvedBaseDt = resolve(baseDt, handler);
+		int baseLength = resolvedBaseDt.getLength();
+		int baseLengthBits = 8 * baseLength;
+		int bitSize = bitFieldDataType.getDeclaredBitSize();
+		int bitOffset = bitFieldDataType.getBitOffset();
+		int storageSize = bitFieldDataType.getStorageSize();
+		int storageSizeBits = 8 * storageSize;
+		if ((bitOffset + bitSize) > storageSizeBits) {
+			// should get recomputed during packing when used within aligned structure
+			int effectiveBitSize = Math.min(bitSize, baseLengthBits);
+			bitOffset = getDataOrganization().isBigEndian() ? baseLengthBits - effectiveBitSize : 0;
+			storageSize = baseLength;
+		}
+		try {
+			return new BitFieldDBDataType(resolvedBaseDt, bitSize, bitOffset);
+		}
+		catch (InvalidDataTypeException e) {
+			throw new AssertException("unexpected", e);
+		}
 	}
 
 	/**
@@ -843,7 +886,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	/**
 	 * This method gets a ".conflict" name that is not currently used by any data types
 	 * in the indicated category of the data type manager.
-	 * @param dtm the data type manager.
 	 * @param path the category path of the category where the new data type live in the data type manager.
 	 * @param name The name of the data type. This name may or may not contain ".conflict" as part of it.
 	 * If the name contains ".conflict", only the part of the name that comes prior to the ".conflict"
@@ -892,14 +934,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (category == null) {
 			return null;
 		}
-		String namePrefix = dtName + DataType.CONFLICT_SUFFIX;
-		DataType[] dataTypes = category.getDataTypes();
-		for (DataType candidate : dataTypes) {
+		List<DataType> relatedByName = category.getDataTypesByBaseName(dtName);
+
+		for (DataType candidate : relatedByName) {
 			String candidateName = candidate.getName();
-			if (candidateName.startsWith(namePrefix)) {
-				if (!candidateName.equals(excludedName) && candidate.isEquivalent(dataType)) {
-					return candidate;
-				}
+			if (!candidateName.equals(excludedName) && candidate.isEquivalent(dataType)) {
+				return candidate;
 			}
 		}
 		return null;
@@ -1127,9 +1167,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * Replace one source archive (oldDTM) with another (newDTM). Any data types whose source
 	 * was the oldDTM will be changed to have a source that is the newDTM.  The oldDTM will no
 	 * longer be referenced as a source by this data type manager.
-	 * @param oldDTM data type manager for the old source archive
-	 * @param newDTM data type manager for the new source archive
-	 * @throws InvalidInputException if the oldDTM isn't currently a source archive for this
+	 * @param oldSourceArchive data type manager for the old source archive
+	 * @param newSourceArchive data type manager for the new source archive
+	 * @throws IllegalArgumentException if the oldDTM isn't currently a source archive for this
 	 * data type manager or if the old and new source archives already have the same unique ID.
 	 */
 	public void replaceSourceArchive(SourceArchive oldSourceArchive,
@@ -1255,35 +1295,22 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			return null;
 		}
 
-		// try to deal with datatypes that have '/' chars in their name.
-		Category category = getLowestLevelCategory(dataTypePath);
+		// Use a category path to parse the datatype path because it knows how to deal with
+		// escaped forward slashes.
+		CategoryPath parsedPath = new CategoryPath(dataTypePath);
+		CategoryPath categoryPath = parsedPath.getParent();
+		String dataTypeName = parsedPath.getName();
+		Category category = getCategory(categoryPath);
 
-		if (category != null) {
-			CategoryPath categoryPath = category.getCategoryPath();
-			String path = categoryPath.getPath();
-			int dataTypeNameStartIndex = path.endsWith("/") ? path.length() : path.length() + 1; // +1 to get past the last '/'
-			String dataTypeName = dataTypePath.substring(dataTypeNameStartIndex);
-			return category.getDataType(dataTypeName);
+		if (category == null) {
+			return null;
 		}
-		return null;
+		return category.getDataType(dataTypeName);
 	}
 
 	@Override
 	public DataType findDataType(String dataTypePath) {
 		return getDataType(dataTypePath);
-	}
-
-	private Category getLowestLevelCategory(String dataTypePath) {
-		CategoryPath pathParser = new CategoryPath(dataTypePath); // Use a category path to parse the path.
-		while (pathParser != null) {
-			CategoryPath path = pathParser.getParent();
-			Category category = getCategory(path);
-			if (category != null) {
-				return category;
-			}
-			pathParser = path;
-		}
-		return null;
 	}
 
 	@Override
@@ -1317,6 +1344,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		if (dt == DataType.DEFAULT) {
 			return DEFAULT_DATATYPE_ID;
+		}
+		if (dt instanceof BitFieldDataType) {
+			return createKey(BITFIELD, BitFieldDBDataType.getId((BitFieldDataType) dt));
 		}
 		if (dt instanceof BadDataType) {
 			return BAD_DATATYPE_ID;
@@ -1645,6 +1675,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		// an undo. So make sure it really is there.
 		if (dataType instanceof DataTypeDB) {
 			long id = ((DataTypeDB) dataType).getKey();
+//	NOTE: Does not seem to help following an undo/redo		
+//			DataTypeDB existingDt = dtCache.get(id);
+//			return existingDt == dataType && existingDt.validate(lock);
+//			
 			return dtCache.get(id) != null;
 		}
 		return builtIn2IdMap.containsKey(dataType);
@@ -1781,8 +1815,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 	}
 
-	private int getTableID(long dataID) {
-		return (int) (dataID >> 56);
+	static int getTableID(long dataID) {
+		return (int) (dataID >> DATA_TYPE_KIND_SHIFT);
 	}
 
 	private DataType getDataType(long dataTypeID, Record record) {
@@ -1802,6 +1836,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				return getFunctionDefDataType(dataTypeID, record);
 			case ENUM:
 				return getEnumDataType(dataTypeID, record);
+			case BITFIELD:
+				return BitFieldDBDataType.getBitFieldDataType(dataTypeID, this);
 			default:
 				return null;
 		}
@@ -2121,6 +2157,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			category.dataTypeAdded(structDB);
 
 			structDB.doReplaceWith(struct, false, handler);
+			structDB.setDescription(struct.getDescription());
 			structDB.notifySizeChanged();
 			// doReplaceWith updated the last change time so set it back to what we want.
 			structDB.setLastChangeTime(struct.getLastChangeTime());
@@ -2189,6 +2226,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			category.dataTypeAdded(unionDB);
 
 			unionDB.doReplaceWith(union, false, handler);
+			unionDB.setDescription(union.getDescription());
 			unionDB.notifySizeChanged();
 			// doReplaceWith updated the last change time so set it back to what we want.
 			unionDB.setLastChangeTime(union.getLastChangeTime());
@@ -2587,20 +2625,19 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * Notifys the category path changed
 	 * @param dt the datatype whose path changed.
 	 * @param oldPath the old category.
+	 * @param oldCatId the old category's record id
 	 */
-	void dataTypeCategoryPathChanged(DataTypeDB dt, CategoryPath oldPath) {
+	void dataTypeCategoryPathChanged(DataTypeDB dt, CategoryPath oldPath, long oldCatId) {
 		if (!(dt instanceof Array) && !(dt instanceof Pointer)) {
 			try {
-				RecordIterator it = arrayAdapter.getRecords();
-				while (it.hasNext()) {
-					Record rec = it.next();
-					ArrayDB array = (ArrayDB) getDataType(rec.getKey(), rec);
+				for (long arrayId : arrayAdapter.getRecordIdsInCategory(oldCatId)) {
+					Record rec = arrayAdapter.getRecord(arrayId);
+					ArrayDB array = (ArrayDB) getDataType(arrayId, rec);
 					array.updatePath(dt);
 				}
-				it = pointerAdapter.getRecords();
-				while (it.hasNext()) {
-					Record rec = it.next();
-					PointerDB ptr = (PointerDB) getDataType(rec.getKey(), rec);
+				for (long ptrId : pointerAdapter.getRecordIdsInCategory(oldCatId)) {
+					Record rec = pointerAdapter.getRecord(ptrId);
+					PointerDB ptr = (PointerDB) getDataType(ptrId, rec);
 					ptr.updatePath(dt);
 				}
 			}
@@ -3128,7 +3165,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * the bits are from the tableKey.
 	 */
 	static long createKey(int tableID, long tableKey) {
-		long key = (long) tableID << 56;
+		long key = (long) tableID << DATA_TYPE_KIND_SHIFT;
 		return key |= tableKey;
 	}
 
@@ -3165,19 +3202,43 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 	}
 
-	DataType[] getParentDataTypes(long childID) {
+	List<DataType> getParentDataTypes(long childID) {
+		lock.acquire();
 		try {
 			long[] ids = parentChildAdapter.getParentIds(childID);
-			DataType[] dts = new DataType[ids.length];
-			for (int i = 0; i < dts.length; i++) {
-				dts[i] = getDataType(ids[i]);
+			List<DataType> dts = new ArrayList<>();
+			for (long id : ids) {
+				DataType dt = getDataType(id);
+				if (dt == null) {
+					// cleanup invalid records for missing parent
+					attemptRecordRemovalForParent(id);
+				}
+				else {
+					dts.add(dt);
+				}
 			}
 			return dts;
+
 		}
 		catch (IOException e) {
 			dbError(e);
 		}
+		finally {
+			lock.release();
+		}
 		return null;
+	}
+
+	private void attemptRecordRemovalForParent(long parentKey) throws IOException {
+		lock.acquire();
+		try {
+			if (dbHandle.isTransactionActive()) {
+				parentChildAdapter.removeAllRecordsForParent(parentKey);
+			}
+		}
+		finally {
+			lock.release();
+		}
 	}
 
 	@Override

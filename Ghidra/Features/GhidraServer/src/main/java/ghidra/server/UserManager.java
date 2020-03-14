@@ -17,6 +17,7 @@ package ghidra.server;
 
 import java.io.*;
 import java.util.*;
+import java.util.regex.Pattern;
 
 import javax.security.auth.login.FailedLoginException;
 import javax.security.auth.x500.X500Principal;
@@ -26,8 +27,7 @@ import org.apache.logging.log4j.Logger;
 
 import ghidra.framework.remote.User;
 import ghidra.framework.store.local.LocalFileSystem;
-import ghidra.util.HashUtilities;
-import ghidra.util.NumericUtilities;
+import ghidra.util.*;
 import ghidra.util.exception.DuplicateNameException;
 
 /**
@@ -59,9 +59,8 @@ public class UserManager {
 	private final File userFile;
 	private final File sshDir;
 
-	private boolean enableLocalPasswords = false;
+	private boolean enableLocalPasswords;
 	private long defaultPasswordExpirationMS;
-	private boolean requireExplicitPasswordReset = true;
 
 	private PrintWriter dnLogOut;
 
@@ -71,14 +70,17 @@ public class UserManager {
 	private boolean userListUpdateInProgress = false;
 
 	/**
-	 * Constructor.
-	 * @param repositoryRoot root server directory
+	 * Construct server user manager
+	 * @param repositoryMgr repository manager (used for queued command processing)
+	 * @param enableLocalPasswords if true user passwords will be maintained 
+	 * 			within local 'users' file
+	 * @param defaultPasswordExpirationDays password expiration in days when 
+	 * 			local passwords are enabled
 	 */
 	UserManager(RepositoryManager repositoryMgr, boolean enableLocalPasswords,
-			boolean requireExplicitPasswordReset, int defaultPasswordExpirationDays) {
+			int defaultPasswordExpirationDays) {
 		this.repositoryMgr = repositoryMgr;
 		this.enableLocalPasswords = enableLocalPasswords;
-		this.requireExplicitPasswordReset = requireExplicitPasswordReset;
 		if (defaultPasswordExpirationDays < 0) {
 			defaultPasswordExpirationDays = DEFAULT_PASSWORD_TIMEOUT_DAYS;
 		}
@@ -163,7 +165,7 @@ public class UserManager {
 	 * @param passwordHash MD5 hash of initial password or null if explicit password reset required
 	 * @param dn X500 distinguished name for user (may be null)
 	 * @throws DuplicateNameException if username already exists
-	 * @throws IOException
+	 * @throws IOException if IO error occurs
 	 */
 	private synchronized void addUser(String username, char[] passwordHash, X500Principal x500User)
 			throws DuplicateNameException, IOException {
@@ -183,18 +185,17 @@ public class UserManager {
 		if (x500User != null) {
 			dnLookupMap.put(x500User, entry);
 		}
-		putUserList();
+		writeUserList();
 	}
 
 	/**
 	 * Add a user.
 	 * @param username user name/SID
 	 * @throws DuplicateNameException if username already exists
-	 * @throws IOException
+	 * @throws IOException if IO error occurs
 	 */
 	public void addUser(String username) throws DuplicateNameException, IOException {
-		char[] passwordHash = requireExplicitPasswordReset ? null : getDefaultPasswordHash();
-		addUser(username, passwordHash, null);
+		addUser(username, null);
 	}
 
 	/**
@@ -202,11 +203,11 @@ public class UserManager {
 	 * @param username user name/SID
 	 * @param x500User X500 distinguished name for user (may be null)
 	 * @throws DuplicateNameException if username already exists
-	 * @throws IOException
+	 * @throws IOException if IO error occurs
 	 */
 	public void addUser(String username, X500Principal x500User)
 			throws DuplicateNameException, IOException {
-		char[] passwordHash = requireExplicitPasswordReset ? null : getDefaultPasswordHash();
+		char[] passwordHash = enableLocalPasswords ? getDefaultPasswordHash() : null;
 		addUser(username, passwordHash, x500User);
 	}
 
@@ -260,7 +261,7 @@ public class UserManager {
 			if (x500User != null) {
 				dnLookupMap.put(x500User, entry);
 			}
-			putUserList();
+			writeUserList();
 			return true;
 		}
 		return false;
@@ -338,7 +339,7 @@ public class UserManager {
 			if (entry.x500User != null) {
 				dnLookupMap.put(entry.x500User, entry);
 			}
-			putUserList();
+			writeUserList();
 			return true;
 		}
 		return false;
@@ -426,7 +427,7 @@ public class UserManager {
 			if (oldEntry.x500User != null) {
 				dnLookupMap.remove(oldEntry.x500User);
 			}
-			putUserList();
+			writeUserList();
 		}
 	}
 
@@ -457,7 +458,7 @@ public class UserManager {
 		}
 		userListUpdateInProgress = true;
 		try {
-			getUserList();
+			readUserListIfNeeded();
 			clearExpiredPasswords();
 			if (processCmds) {
 				UserAdmin.processCommands(repositoryMgr);
@@ -488,21 +489,22 @@ public class UserManager {
 			}
 		}
 		if (dataChanged) {
-			putUserList();
+			writeUserList();
 		}
 	}
 
 	/**
-	 * Read user data from file.
+	 * Read user data from file if the timestamp on the file has changed.
+	 * 
 	 * @throws IOException
 	 */
-	private void getUserList() throws IOException {
+	private void readUserListIfNeeded() throws IOException {
 
 		long lastMod = userFile.lastModified();
 		if (lastUserListChange == lastMod) {
 			if (lastMod == 0) {
 				// Create empty file if it does not yet exist
-				putUserList();
+				writeUserList();
 			}
 			return;
 		}
@@ -546,58 +548,62 @@ public class UserManager {
 		}
 	}
 
-	private static void readUserList(File file, LinkedHashMap<String, UserEntry> list,
-			HashMap<X500Principal, UserEntry> x500LookupMap) throws IOException {
+	private static void readUserList(File file, Map<String, UserEntry> usersIndexByName,
+			Map<X500Principal, UserEntry> x500LookupMap) throws IOException {
 		try (BufferedReader br = new BufferedReader(new FileReader(file))) {
-			String line = br.readLine();
-			while (line != null) {
-				if (!line.startsWith("#")) {
-					try {
-						StringTokenizer st = new StringTokenizer(line, ":");
-						UserEntry entry = new UserEntry();
-						entry.username = st.nextToken();
+			String line;
+			while ((line = br.readLine()) != null) {
+				if (line.startsWith("#")) {
+					continue;
+				}
+				try {
+					StringTokenizer st = new StringTokenizer(line, ":");
+					UserEntry entry = new UserEntry();
+					entry.username = st.nextToken();
+					if (!isValidUserName(entry.username)) {
+						log.error("Invalid user name, skipping: " + entry.username);
+						continue;
+					}
 
-						// Password Hash
+					// Password Hash
+					if (st.hasMoreTokens()) {
+						entry.passwordHash = st.nextToken().toCharArray();
+
+						// Password Time
 						if (st.hasMoreTokens()) {
-							entry.passwordHash = st.nextToken().toCharArray();
-
-							// Password Time
-							if (st.hasMoreTokens()) {
-								try {
-									String timeStr = st.nextToken();
-									if ("*".equals(timeStr)) {
-										entry.passwordTime = NO_EXPIRATION;
-									}
-									else {
-										entry.passwordTime = NumericUtilities.parseHexLong(timeStr);
-									}
+							try {
+								String timeStr = st.nextToken();
+								if ("*".equals(timeStr)) {
+									entry.passwordTime = NO_EXPIRATION;
 								}
-								catch (NumberFormatException e) {
-									log.error("Invalid password time - forced expiration: " +
-										entry.username);
-									entry.passwordTime = 0;
-								}
-
-								// Distinguished Name
-								if (st.hasMoreTokens()) {
-									String dn = st.nextToken();
-									if (dn.length() > 0) {
-										entry.x500User = new X500Principal(dn);
-									}
-
+								else {
+									entry.passwordTime = NumericUtilities.parseHexLong(timeStr);
 								}
 							}
-						}
-						list.put(entry.username, entry);
-						if (entry.x500User != null) {
-							x500LookupMap.put(entry.x500User, entry);
+							catch (NumberFormatException e) {
+								log.error(
+									"Invalid password time - forced expiration: " + entry.username);
+								entry.passwordTime = 0;
+							}
+
+							// Distinguished Name
+							if (st.hasMoreTokens()) {
+								String dn = st.nextToken();
+								if (dn.length() > 0) {
+									entry.x500User = new X500Principal(dn);
+								}
+
+							}
 						}
 					}
-					catch (NoSuchElementException e) {
-						// skip entry
+					usersIndexByName.put(entry.username, entry);
+					if (entry.x500User != null) {
+						x500LookupMap.put(entry.x500User, entry);
 					}
 				}
-				line = br.readLine();
+				catch (NoSuchElementException e) {
+					// skip entry
+				}
 			}
 		}
 	}
@@ -606,12 +612,9 @@ public class UserManager {
 	 * Write user data to file.
 	 * @throws IOException
 	 */
-	private void putUserList() throws IOException {
-		BufferedWriter bw = new BufferedWriter(new FileWriter(userFile));
-		try {
-			Iterator<UserEntry> iter = userList.values().iterator();
-			while (iter.hasNext()) {
-				UserEntry entry = iter.next();
+	private void writeUserList() throws IOException {
+		try (BufferedWriter bw = new BufferedWriter(new FileWriter(userFile))) {
+			for (UserEntry entry : userList.values()) {
 				bw.write(entry.username);
 				bw.write(":");
 				if (entry.passwordHash != null) {
@@ -632,13 +635,6 @@ public class UserManager {
 					bw.write(entry.x500User.getName());
 				}
 				bw.newLine();
-			}
-		}
-		finally {
-			try {
-				bw.close();
-			}
-			catch (IOException e) {
 			}
 		}
 		lastUserListChange = userFile.lastModified();
@@ -740,7 +736,24 @@ public class UserManager {
 			getDNLog().println(username + "; " + principal);
 		}
 		catch (IOException e) {
+			// ignore
 		}
+	}
+
+	/*
+	 * Regex: matches if the entire string is alpha, digit, ".", "-", "_", fwd or back slash.
+	 */
+	private static final Pattern VALID_USERNAME_REGEX = Pattern.compile("[a-zA-Z0-9.\\-_/\\\\]+");
+
+	/**
+	 * Ensures a name only contains valid characters and meets length limitations.
+	 * 
+	 * @param s name string
+	 * @return boolean true if valid name, false if not valid
+	 */
+	public static boolean isValidUserName(String s) {
+		return VALID_USERNAME_REGEX.matcher(s).matches() &&
+			s.length() <= NamingUtilities.MAX_NAME_LENGTH;
 	}
 
 }

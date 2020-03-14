@@ -145,6 +145,7 @@ void Funcdata::stopProcessing(void)
 
 {
   flags |= processing_complete;
+  obank.destroyDead();		// Free up anything in the dead list
 #ifdef CPUI_STATISTICS
   glb->stats->process(*this);
 #endif
@@ -208,6 +209,7 @@ void Funcdata::spacebase(void)
 
   for(j=0;j<glb->numSpaces();++j) {
     spc = glb->getSpace(j);
+    if (spc == (AddrSpace *)0) continue;
     numspace = spc->numSpacebase();
     for(i=0;i<numspace;++i) {
       const VarnodeData &point(spc->getSpacebase(i));
@@ -289,7 +291,6 @@ Varnode *Funcdata::findSpacebaseInput(AddrSpace *id) const
 void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const Address &rampoint,uintb origval,int4 origsize)
 
 {
-  PcodeOp *addop;
   int4 sz = rampoint.getAddrSize();
   AddrSpace *spaceid = rampoint.getSpace();
   Datatype *sb_type = glb->types->getTypeSpacebase(spaceid,Address());
@@ -299,21 +300,47 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const 
   uintb extra = rampoint.getOffset() - entry->getAddr().getOffset();		// Offset from beginning of entry
   extra = AddrSpace::byteToAddress(extra,rampoint.getSpace()->getWordSize());	// Convert to address units
 
+  PcodeOp *addOp = (PcodeOp *)0;
+  PcodeOp *extraOp = (PcodeOp *)0;
+  PcodeOp *zextOp = (PcodeOp *)0;
+  PcodeOp *subOp = (PcodeOp *)0;
+  bool isCopy = false;
+  if (op->code() == CPUI_COPY) {	// We replace COPY with final op of this calculation
+    isCopy = true;
+    if (sz < origsize)
+      zextOp = op;
+    else {
+      op->insertInput(1);	// PTRSUB, ADD, SUBPIECE all take 2 parameters
+      if (origsize < sz)
+	subOp = op;
+      else if (extra != 0)
+	extraOp = op;
+      else
+	addOp = op;
+    }
+  }
   spacebase_vn = newConstant(sz,0);
   spacebase_vn->updateType(sb_type,true,true);
   spacebase_vn->setFlags(Varnode::spacebase);
-  addop = newOp(2,op->getAddr());
-  opSetOpcode(addop,CPUI_PTRSUB);
-  outvn = newUniqueOut(sz,addop);
+  if (addOp == (PcodeOp *)0) {
+    addOp = newOp(2,op->getAddr());
+    opSetOpcode(addOp,CPUI_PTRSUB);
+    newUniqueOut(sz,addOp);
+    opInsertBefore(addOp,op);
+  }
+  else {
+    opSetOpcode(addOp,CPUI_PTRSUB);
+  }
+  outvn = addOp->getOut();
   // Make sure newconstant and extra preserve origval in address units
   uintb newconstoff = origval - extra;		// everything is already in address units
   newconst = newConstant(sz,newconstoff);
   newconst->setPtrCheck();	// No longer need to check this constant as a pointer
   if (spaceid->isTruncated())
-    addop->setPtrFlow();
-  opSetInput(addop,spacebase_vn,0);
-  opSetInput(addop,newconst,1);
-  opInsertBefore(addop,op);
+    addOp->setPtrFlow();
+  opSetInput(addOp,spacebase_vn,0);
+  opSetInput(addOp,newconst,1);
+
   Symbol *sym = entry->getSymbol();
   Datatype *entrytype = sym->getType();
   Datatype *ptrentrytype = glb->types->getTypePointer(sz,entrytype,spaceid->getWordSize());
@@ -322,25 +349,47 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const 
     typelock = false;
   outvn->updateType(ptrentrytype,typelock,true);
   if (extra != 0) {
-    PcodeOp *extraop = newOp(2,op->getAddr());
-    opSetOpcode(extraop,CPUI_INT_ADD);
-    Varnode *outvn2 = newUniqueOut(sz,extraop);
+    if (extraOp == (PcodeOp *)0) {
+      extraOp = newOp(2,op->getAddr());
+      opSetOpcode(extraOp,CPUI_INT_ADD);
+      newUniqueOut(sz,extraOp);
+      opInsertBefore(extraOp,op);
+    }
+    else
+      opSetOpcode(extraOp,CPUI_INT_ADD);
     Varnode *extconst = newConstant(sz,extra);
     extconst->setPtrCheck();
-    opSetInput(extraop,outvn,0);
-    opSetInput(extraop,extconst,1);
-    outvn = outvn2;
-    opInsertBefore(extraop,op);
+    opSetInput(extraOp,outvn,0);
+    opSetInput(extraOp,extconst,1);
+    outvn = extraOp->getOut();
   }
-  if (sz != origsize) {		// There is a change in size from address -> varnode
-    PcodeOp *zextop = newOp(1,op->getAddr());
-    Varnode *outvn2 = newUniqueOut(origsize,zextop);
-    opSetOpcode(zextop,CPUI_INT_ZEXT); // Create an extension to get back to original varnode size
-    opSetInput(zextop,outvn,0);
-    opInsertBefore(zextop,op);
-    outvn = outvn2;
+  if (sz < origsize) {		// The new constant is smaller than the original varnode, so we extend it
+    if (zextOp == (PcodeOp *)0) {
+      zextOp = newOp(1,op->getAddr());
+      opSetOpcode(zextOp,CPUI_INT_ZEXT); // Create an extension to get back to original varnode size
+      newUniqueOut(origsize,zextOp);
+      opInsertBefore(zextOp,op);
+    }
+    else
+      opSetOpcode(zextOp,CPUI_INT_ZEXT);
+    opSetInput(zextOp,outvn,0);
+    outvn = zextOp->getOut();
   }
-  opSetInput(op,outvn,slot);
+  else if (origsize < sz) {	// The new constant is bigger than the original varnode, truncate it
+    if (subOp == (PcodeOp *)0) {
+      subOp = newOp(2,op->getAddr());
+      opSetOpcode(subOp,CPUI_SUBPIECE);
+      newUniqueOut(origsize,subOp);
+      opInsertBefore(subOp,op);
+    }
+    else
+      opSetOpcode(subOp,CPUI_SUBPIECE);
+    opSetInput(subOp,outvn,0);
+    opSetInput(subOp,newConstant(4, 0), 1);	// Take least significant piece
+    outvn = subOp->getOut();
+  }
+  if (!isCopy)
+    opSetInput(op,outvn,slot);
 }
 
 void Funcdata::clearCallSpecs(void)
@@ -356,7 +405,7 @@ void Funcdata::clearCallSpecs(void)
 
 FuncCallSpecs *Funcdata::getCallSpecs(const PcodeOp *op) const
 
-{				// Get FuncCallSpecs from CALL op
+{
   int4 i;
   const Varnode *vn;
 
@@ -558,7 +607,6 @@ void Funcdata::saveVarnodeXml(ostream &s,VarnodeLocSet::const_iterator iter,Varn
 void Funcdata::saveXmlHigh(ostream &s) const
 
 {
-  int4 j;
   Varnode *vn;
   HighVariable *high;
 
@@ -571,32 +619,7 @@ void Funcdata::saveXmlHigh(ostream &s) const
     high = vn->getHigh();
     if (high->isMark()) continue;
     high->setMark();
-    vn = high->getNameRepresentative(); // Get representative varnode
-    s << "<high ";
-    //    a_v(s,"name",high->getName());
-    a_v_u(s,"repref",vn->getCreateIndex());
-    if (high->isSpacebase()||high->isImplied()) // This is a special variable
-      a_v(s,"class",string("other"));
-    else if (high->isPersist()&&high->isAddrTied()) // Global variable
-      a_v(s,"class",string("global"));
-    else if (high->isConstant())
-      a_v(s,"class",string("constant"));
-    else if (!high->isPersist())
-      a_v(s,"class",string("local"));
-    else
-      a_v(s,"class",string("other"));
-    if (high->isTypeLock())
-      a_v_b(s,"typelock",true);
-    if (high->getSymbol() != (Symbol *)0)
-      a_v_u(s,"symref",high->getSymbol()->getId());
-    s << '>';
-    high->getType()->saveXml(s);
-    for(j=0;j<high->numInstances();++j) {
-      s << "<addr ";
-      a_v_u(s,"ref",high->getInstance(j)->getCreateIndex());
-      s << "/>";
-    }
-    s << "</high>";
+    high->saveXml(s);
   }
   for(iter=beginLoc();iter!=endLoc();++iter) {
     vn = *iter;
@@ -617,7 +640,7 @@ void Funcdata::saveXmlTree(ostream &s) const
   s << "<varnodes>\n";
   for(int4 i=0;i<glb->numSpaces();++i) {
     AddrSpace *base = glb->getSpace(i);
-    if (base->getType()==IPTR_IOP) continue;
+    if (base == (AddrSpace *)0 || base->getType()==IPTR_IOP) continue;
     VarnodeLocSet::const_iterator iter = vbank.beginLoc(base);
     VarnodeLocSet::const_iterator enditer = vbank.endLoc(base);
     saveVarnodeXml(s,iter,enditer);
@@ -659,11 +682,14 @@ void Funcdata::saveXmlTree(ostream &s) const
 /// If indicated by the caller, a description of the entire PcodeOp and Varnode
 /// tree is also emitted.
 /// \param s is the output stream
+/// \param id is the unique id associated with the function symbol
 /// \param savetree is \b true if the p-code tree should be emitted
-void Funcdata::saveXml(ostream &s,bool savetree) const
+void Funcdata::saveXml(ostream &s,uint8 id,bool savetree) const
 
 {
   s << "<function";
+  if (id != 0)
+    a_v_u(s, "id", id);
   a_v(s,"name",name);
   a_v_i(s,"size",size);
   if (hasNoCode())
@@ -689,22 +715,30 @@ void Funcdata::saveXml(ostream &s,bool savetree) const
 /// From an XML \<function> tag, recover the name, address, prototype, symbol,
 /// jump-table, and override information for \b this function.
 /// \param el is the root \<function> tag
-void Funcdata::restoreXml(const Element *el)
+/// \return the symbol id associated with the function
+uint8 Funcdata::restoreXml(const Element *el)
 
 {
   //  clear();  // Shouldn't be needed
   name.clear();
   size = -1;
+  uint8 id = 0;
   AddrSpace *stackid = glb->getStackSpace();
   for(int4 i=0;i<el->getNumAttributes();++i) {
-    if (el->getAttributeName(i) == "name")
+    const string &attrName(el->getAttributeName(i));
+    if (attrName == "name")
       name = el->getAttributeValue(i);
-    else if (el->getAttributeName(i) == "size") {
+    else if (attrName == "size") {
       istringstream s( el->getAttributeValue(i));
       s.unsetf(ios::dec | ios::hex | ios::oct);
       s >> size;
     }
-    else if (el->getAttributeName(i) == "nocode") {
+    else if (attrName == "id") {
+      istringstream s( el->getAttributeValue(i));
+      s.unsetf(ios::dec | ios::hex | ios::oct);
+      s >> id;
+    }
+    else if (attrName == "nocode") {
       if (xml_readbool(el->getAttributeValue(i)))
 	flags |= no_code;
     }
@@ -756,6 +790,7 @@ void Funcdata::restoreXml(const Element *el)
     funcp.setScope(localmap,baseaddr+ -1);
   }
   localmap->resetLocalWindow();
+  return id;
 }
 
 /// \brief Inject p-code from a \e payload into \b this live function

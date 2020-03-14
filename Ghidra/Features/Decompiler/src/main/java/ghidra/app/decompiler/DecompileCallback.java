@@ -40,7 +40,7 @@ import ghidra.program.model.symbol.*;
 import ghidra.util.Msg;
 import ghidra.util.UndefinedFunction;
 import ghidra.util.exception.UsrException;
-import ghidra.util.task.TaskMonitorAdapter;
+import ghidra.util.task.TaskMonitor;
 import ghidra.util.xml.SpecXmlUtils;
 import ghidra.util.xml.XmlUtilities;
 
@@ -80,7 +80,7 @@ public class DecompileCallback {
 		listing = program.getListing();
 		addrfactory = program.getAddressFactory();
 		dtmanage = dt;
-		default_extrapop = pcodecompilerspec.getCallStackMod();
+		default_extrapop = pcodecompilerspec.getDefaultCallingConvention().getExtrapop();
 		cpool = null;
 		nativeMessage = null;
 		debug = null;
@@ -103,6 +103,7 @@ public class DecompileCallback {
 	 * Establish function and debug context for next decompilation
 	 * 
 	 * @param func is the function to be decompiled
+	 * @param entry is the function's entry address
 	 * @param dbg is the debugging context (or null)
 	 */
 	public void setFunction(Function func, Address entry, DecompileDebug dbg) {
@@ -132,11 +133,11 @@ public class DecompileCallback {
 	}
 
 	/**
-	 * Used by the decompiler to return a message
+	 * Cache a message returned by the decompiler process
 	 * 
-	 * @param msg
+	 * @param msg is the message
 	 */
-	public void setNativeMessage(String msg) {
+	void setNativeMessage(String msg) {
 		nativeMessage = msg;
 	}
 
@@ -183,9 +184,16 @@ public class DecompileCallback {
 				return null;
 			}
 			byte[] resbytes = new byte[size];
-			program.getMemory().getBytes(addr, resbytes, 0, size);
+			int bytesRead = program.getMemory().getBytes(addr, resbytes, 0, size);
 			if (debug != null) {
-				debug.getBytes(addr, resbytes);
+				if (bytesRead != size) {
+					byte[] debugBytes = new byte[bytesRead];
+					System.arraycopy(resbytes, 0, debugBytes, 0, bytesRead);
+					debug.getBytes(addr, debugBytes);
+				}
+				else {
+					debug.getBytes(addr, resbytes);
+				}
 			}
 			return resbytes;
 		}
@@ -206,7 +214,8 @@ public class DecompileCallback {
 	 * Collect any/all comments for the function starting at the indicated
 	 * address
 	 * 
-	 * @param addrstring = string rep of function address
+	 * @param addrstring is the XML rep of function address
+	 * @param types is the string encoding of the comment type flags
 	 * @return XML document describing comments
 	 */
 	public String getComments(String addrstring, String types) {
@@ -294,13 +303,6 @@ public class DecompileCallback {
 	}
 
 	/**
-	 * @param ops pcode ops
-	 * @param fallthruoffset number of bytes after instruction start that pcode
-	 *            flow falls into
-	 * 
-	 * @return XML document string representing all the pcode
-	 */
-	/**
 	 * Build an XML representation of all the pcode op's a given Instruction is
 	 * defined to perform.
 	 * 
@@ -308,8 +310,8 @@ public class DecompileCallback {
 	 * @param fallthruoffset number of bytes after instruction start that pcode
 	 *            flow falls into
 	 * @param paramshift special instructions for injection use
-	 * @param addrFactory
-	 * @return XML document as string
+	 * @param addrFactory is the address factory for recovering address space names
+	 * @return XML document as string representing all the p-code
 	 */
 	public static String buildInstruction(PcodeOp[] ops, int fallthruoffset, int paramshift,
 			AddressFactory addrFactory) {
@@ -439,7 +441,7 @@ public class DecompileCallback {
 
 		if (pseudoDisassembler == null) {
 			pseudoDisassembler = Disassembler.getDisassembler(program, false, false, false,
-				TaskMonitorAdapter.DUMMY_MONITOR, msg -> {
+				TaskMonitor.DUMMY, msg -> {
 					// TODO: Should we log errors?
 				});
 		}
@@ -669,8 +671,9 @@ public class DecompileCallback {
 				if (extRef != null) {
 					func = listing.getFunctionAt(extRef.getToAddress());
 					if (func == null) {
-						String res = HighFunction.buildFunctionShellXML(extRef.getLabel(), addr);
-						return buildResult(addr, null, res, null);
+						HighSymbol shellSymbol =
+							new HighFunctionShellSymbol(0, extRef.getLabel(), addr, dtmanage);
+						return buildResult(shellSymbol, null);
 					}
 				}
 				else {
@@ -688,13 +691,12 @@ public class DecompileCallback {
 			int extrapop = getExtraPopOverride(func, addr);
 			hfunc.grabFromFunction(extrapop, false, (extrapop != default_extrapop));
 
-			String res = hfunc.buildFunctionXML(addr, 2);
+			HighSymbol funcSymbol = new HighFunctionSymbol(addr, 2, hfunc);
 			Namespace namespc = func.getParentNamespace();
 			if (debug != null) {
 				debug.getFNTypes(hfunc);
 			}
-			res = buildResult(addr, null, res, namespc);
-			return res;
+			return buildResult(funcSymbol, namespc);
 		}
 		catch (Exception e) {
 			Msg.error(this,
@@ -788,7 +790,7 @@ public class DecompileCallback {
 		return name;
 	}
 
-	private String buildResult(Address addr, Address pc, String sym, Namespace namespc) {
+	private String buildResult(HighSymbol highSymbol, Namespace namespc) {
 		StringBuilder res = new StringBuilder();
 		res.append("<result>\n");
 		res.append("<parent>\n");
@@ -799,16 +801,15 @@ public class DecompileCallback {
 			HighFunction.createNamespaceTag(res, namespc);
 		}
 		res.append("</parent>\n");
-		String addrRes = Varnode.buildXMLAddress(addr);
 		if (debug != null) {
 			StringBuilder res2 = new StringBuilder();
-			HighSymbol.buildMapSymXML(res2, addrRes, pc, sym);
+			HighSymbol.buildMapSymXML(res2, highSymbol);
 			String res2string = res2.toString();
 			debug.getMapped(namespc, res2string);
 			res.append(res2string);
 		}
 		else {
-			HighSymbol.buildMapSymXML(res, addrRes, pc, sym);
+			HighSymbol.buildMapSymXML(res, highSymbol);
 		}
 		res.append("</result>\n");
 
@@ -816,30 +817,25 @@ public class DecompileCallback {
 	}
 
 	private String buildData(Data data) { // Convert global variable to XML
-		Address addr = data.getMinAddress();
 		Symbol sym = data.getPrimarySymbol();
-		boolean readonly = data.isConstant();
-		boolean isVolatile = data.isVolatile();
-		if (!readonly) {
-			readonly = isReadOnlyNoData(addr);
+		HighCodeSymbol highSymbol;
+		if (sym != null) {
+			highSymbol = new HighCodeSymbol(sym.getID(), sym.getName(), data, dtmanage);
 		}
-		if (!isVolatile) {
-			isVolatile = isVolatileNoData(addr);
+		else {
+			highSymbol = new HighCodeSymbol(0,
+				SymbolUtilities.getDynamicName(program, data.getAddress()), data, dtmanage);
+			SymbolEntry entry = highSymbol.getFirstWholeMap();
+			if (data.getDataType() == DataType.DEFAULT && !entry.isReadOnly() &&
+				!entry.isVolatile()) {
+				return null;
+			}
 		}
-		if ((data.getDataType() == DataType.DEFAULT) && (sym == null) && !isVolatile && !readonly) {
-			return null;
-		}
-
-		String name = sym != null ? sym.getName() : SymbolUtilities.getDynamicName(program, addr);
-
-		int sz = data.getLength();
-		String symstring = MappedSymbol.buildSymbolXML(dtmanage, name, data.getDataType(), sz, true,
-			true, readonly, isVolatile, -1, -1);
 		if (debug != null) {
-			debug.getType(data.getDataType());
+			debug.getType(highSymbol.getDataType());
 		}
 		Namespace namespc = (sym != null) ? sym.getParentNamespace() : null;
-		return buildResult(addr, null, symstring, namespc);
+		return buildResult(highSymbol, namespc);
 	}
 
 	private StringBuilder buildRegister(Register reg) {
@@ -852,59 +848,16 @@ public class DecompileCallback {
 		return resBuf;
 	}
 
-//	/**
-//	 * For registers, return their name.
-//	 * 
-//	 * TODO: should look in the scope and return the global register.
-//	 * 
-//	 * @param addr
-//	 * @return xml string
-//	 */
-//	private String buildRegisterRef(Register reg) {
-//		Symbol sym = program.getSymbolTable().getPrimarySymbol(reg.getAddress());
-//		if (sym==null)
-//			return null;
-//
-//		boolean readonly = false;
-//		DataType dt = dtmanage.findInteger(reg.getMinimumByteSize());
-//		String symstring =
-//			HighVariable.buildMappedSymbolXML(dtmanage, reg.getName(), dt,
-//				reg.getMinimumByteSize(), true, true, readonly, false, -1, -1);
-//		if (debug != null)
-//			debug.getType(dt);
-////		Namespace namespc = sym.getParentNamespace();
-//		return buildResult(reg.getAddress(), null, symstring, null);
-//	}
-
 	/**
-	 * Generate non-data symbol, probably a code label
+	 * Generate description of a non-data symbol, probably a code label
 	 * 
-	 * @param sym
-	 * @return
+	 * @param sym is the symbol
+	 * @return the XML description
 	 */
 	private String buildLabel(Symbol sym, Address addr) {
-		// TODO: Assume this is not data
-		boolean isVolatile = isVolatileNoData(addr);
-		if (!isVolatile) {
-			isVolatile = program.getLanguage().isVolatile(addr);
-		}
-		boolean readonly = isReadOnlyNoData(addr);
-
-		StringBuilder buf = new StringBuilder();
-		buf.append("<labelsym");
-		SpecXmlUtils.xmlEscapeAttribute(buf, "name", sym.getName());
-		SpecXmlUtils.encodeBooleanAttribute(buf, "namelock", true);
-		SpecXmlUtils.encodeBooleanAttribute(buf, "typelock", true);
-		if (readonly) {
-			SpecXmlUtils.encodeBooleanAttribute(buf, "readonly", true);
-		}
-		if (isVolatile) {
-			SpecXmlUtils.encodeBooleanAttribute(buf, "volatile", true);
-		}
-		SpecXmlUtils.encodeSignedIntegerAttribute(buf, "cat", -1);
-		buf.append("/>\n");
+		HighSymbol labelSymbol = new HighLabelSymbol(sym.getName(), addr, dtmanage);
 		Namespace namespc = sym.getParentNamespace();
-		return buildResult(sym.getAddress(), null, buf.toString(), namespc);
+		return buildResult(labelSymbol, namespc);
 	}
 
 	/**
@@ -966,7 +919,7 @@ public class DecompileCallback {
 	 * @param addr The queried address
 	 * @param includeDefaultNames true if default parameter names should be
 	 *            included
-	 * @return
+	 * @return XML string describing the function or the hole
 	 */
 	private String buildFunctionXML(Function func, Address addr, boolean includeDefaultNames) {
 		Address entry = func.getEntryPoint();
@@ -980,12 +933,12 @@ public class DecompileCallback {
 				hfunc.grabFromFunction(extrapop, includeDefaultNames,
 					(extrapop != default_extrapop));
 
-				String funcsym = hfunc.buildFunctionXML(entry, (int) (diff + 1));
+				HighSymbol functionSymbol = new HighFunctionSymbol(entry, (int) (diff + 1), hfunc);
 				Namespace namespc = func.getParentNamespace();
 				if (debug != null) {
 					debug.getFNTypes(hfunc);
 				}
-				return buildResult(entry, null, funcsym, namespc);
+				return buildResult(functionSymbol, namespc);
 			}
 		}
 
@@ -1119,15 +1072,6 @@ public class DecompileCallback {
 	}
 
 	private String buildExternalRef(Address addr, ExternalReference ref) {
-		StringBuilder resBuf = new StringBuilder();
-		resBuf.append("<externrefsymbol");
-		String nm = ref.getLabel();
-		if ((nm != null) && (nm.length() > 0)) { // Give the symbol a name if we can
-			SpecXmlUtils.xmlEscapeAttribute(resBuf, "name", nm + "_exref");
-		}
-		resBuf.append(">\n");
-		resBuf.append(Varnode.buildXMLAddress(addr));
-//		res += Varnode.buildXMLAddress(ref.getToAddress());
 		// The decompiler model was to assume that the ExternalReference
 		// object could resolve the physical address where the dll
 		// function was getting loaded, just as a linker would do.
@@ -1141,8 +1085,8 @@ public class DecompileCallback {
 		// the address of the reference to hang the function on, and make
 		// no attempt to get a realistic linked address.  This works because
 		// we never read bytes or look up code units at the address.
-		resBuf.append("</externrefsymbol>\n");
-		return buildResult(addr, null, resBuf.toString(), null);
+		HighSymbol externSymbol = new HighExternalSymbol(ref.getLabel(), addr, addr, dtmanage);
+		return buildResult(externSymbol, null);
 	}
 
 	private void buildTrackSet(StringBuilder buf, Register reg, long val) {
@@ -1172,7 +1116,7 @@ public class DecompileCallback {
 	 * Return the global object being referred to by addr
 	 * 
 	 * @param addr = Address being queried
-	 * @return
+	 * @return the global object
 	 */
 	private Object lookupSymbol(Address addr) {
 		ExternalReference ref = getExternalReference(addr);

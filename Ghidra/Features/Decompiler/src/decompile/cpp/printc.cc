@@ -18,6 +18,7 @@
 
 // Operator tokens for expressions
 //                        token #in prec assoc   optype       space bump
+OpToken PrintC::hidden = { "", 1, 70, false, OpToken::hiddenfunction, 0, 0, (OpToken *)0 };
 OpToken PrintC::scope = { "::", 2, 70, true, OpToken::binary, 0, 0, (OpToken *)0 };
 OpToken PrintC::object_member = { ".", 2, 66, true, OpToken::binary, 0, 0, (OpToken *)0  };
 OpToken PrintC::pointer_member = { "->", 2, 66, true, OpToken::binary, 0, 0, (OpToken *)0 };
@@ -98,6 +99,7 @@ PrintC::PrintC(Architecture *g,const string &nm) : PrintLanguage(g,nm)
   option_convention = true;
   option_nocasts = false;
   option_unplaced = false;
+  option_hide_exts = true;
   nullToken = "NULL";
   
   // Set the flip tokens
@@ -316,6 +318,21 @@ void PrintC::opTypeCast(const PcodeOp *op)
     pushOp(&typecast,op);
     pushType(op->getOut()->getHigh()->getType());
   }
+  pushVnImplied(op->getIn(0),op,mods);
+}
+
+/// The syntax represents the given op using a function with one input,
+/// where the function name is not printed. The input expression is simply printed
+/// without adornment inside the larger expression, with one minor difference.
+/// The hidden operator protects against confusing evaluation order between
+/// the operators inside and outside the hidden function.  If both the inside
+/// and outside operators are the same associative token, the hidden token
+/// makes sure the inner expression is surrounded with parentheses.
+/// \param op is the given PcodeOp
+void PrintC::opHiddenFunc(const PcodeOp *op)
+
+{
+  pushOp(&hidden,op);
   pushVnImplied(op->getIn(0),op,mods);
 }
 
@@ -574,20 +591,28 @@ void PrintC::opReturn(const PcodeOp *op)
   pushAtom(Atom("",blanktoken,EmitXml::no_color));
 }
 
-void PrintC::opIntZext(const PcodeOp *op)
+void PrintC::opIntZext(const PcodeOp *op,const PcodeOp *readOp)
 
 {
-  if (castStrategy->isZextCast(op->getOut()->getHigh()->getType(),op->getIn(0)->getHigh()->getType()))
-    opTypeCast(op);
+  if (castStrategy->isZextCast(op->getOut()->getHigh()->getType(),op->getIn(0)->getHigh()->getType())) {
+    if (option_hide_exts && castStrategy->isExtensionCastImplied(op,readOp))
+      opHiddenFunc(op);
+    else
+      opTypeCast(op);
+  }
   else
     opFunc(op);
 }
 
-void PrintC::opIntSext(const PcodeOp *op)
+void PrintC::opIntSext(const PcodeOp *op,const PcodeOp *readOp)
 
 {
-  if (castStrategy->isSextCast(op->getOut()->getHigh()->getType(),op->getIn(0)->getHigh()->getType()))
-    opTypeCast(op);
+  if (castStrategy->isSextCast(op->getOut()->getHigh()->getType(),op->getIn(0)->getHigh()->getType())) {
+    if (option_hide_exts && castStrategy->isExtensionCastImplied(op,readOp))
+      opHiddenFunc(op);
+    else
+      opTypeCast(op);
+  }
   else
     opFunc(op);
 }
@@ -745,16 +770,11 @@ void PrintC::opPtrsub(const PcodeOp *op)
     }
   }
   else if (ct->getMetatype() == TYPE_SPACEBASE) {
-    TypeSpacebase *sb = (TypeSpacebase *)ct;
-    Scope *scope = sb->getMap();
-    Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr());
-    if (addr.isInvalid())
-      throw LowlevelError("Unable to generate proper address from spacebase");
-    SymbolEntry *entry = scope->queryContainer(addr,1,Address());
-    Datatype *ct = (Datatype *)0;
+    HighVariable *high = op->getIn(1)->getHigh();
+    Symbol *symbol = high->getSymbol();
     arrayvalue = false;
-    if (entry != (SymbolEntry *)0) {
-      ct = entry->getSymbol()->getType();
+    if (symbol != (Symbol *)0) {
+      ct = symbol->getType();
 	   // The '&' is dropped if the output type is an array
       if (ct->getMetatype()==TYPE_ARRAY) {
 	arrayvalue = valueon;	// If printing value, use [0]
@@ -770,18 +790,21 @@ void PrintC::opPtrsub(const PcodeOp *op)
       if (arrayvalue)
 	pushOp(&subscript,op);
     }
-    if (entry == (SymbolEntry *)0)
+    if (symbol == (Symbol *)0) {
+      TypeSpacebase *sb = (TypeSpacebase *)ct;
+      Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr());
       pushUnnamedLocation(addr,(Varnode *)0,op);
+    }
     else {
-      int4 off = (int4)(addr.getOffset() - entry->getAddr().getOffset()) + entry->getOffset();
+      int4 off = high->getSymbolOffset();
       if (off == 0)
-	pushSymbol(entry->getSymbol(),(Varnode *)0,op);
+	pushSymbol(symbol,(Varnode *)0,op);
       else {
 	// If this "value" is getting used as a storage location
 	// we can't use a cast in its description, so turn off
 	// casting when printing the partial symbol
 	//	Datatype *exttype = ((mods & print_store_value)!=0) ? (Datatype *)0 : ct;
-	pushPartialSymbol(entry->getSymbol(),off,0,(Varnode *)0,op,(Datatype *)0);
+	pushPartialSymbol(symbol,off,0,(Varnode *)0,op,(Datatype *)0);
       }
     }
     if (arrayvalue)
@@ -943,6 +966,18 @@ void PrintC::opNewOp(const PcodeOp *op)
   pushOp(&function_call,op);
   pushAtom(Atom("new",optoken,EmitXml::keyword_color,op,outvn));
   pushVnImplied(vn0,op,mods);
+}
+
+void PrintC::opInsertOp(const PcodeOp *op)
+
+{
+  opFunc(op);	// If no other way to print it, print as functional operator
+}
+
+void PrintC::opExtractOp(const PcodeOp *op)
+
+{
+  opFunc(op);	// If no other way to print it, print as functional operator
 }
 
 /// \brief Push a constant with an integer data-type to the RPN stack
@@ -1323,8 +1358,9 @@ bool PrintC::pushPtrCharConstant(uintb val,const TypePointer *ct,const Varnode *
 
 {
   if (val==0) return false;
-  AddrSpace *spc = glb->getDefaultSpace();
-  Address stringaddr = glb->resolveConstant(spc,val,ct->getSize(),op->getAddr());
+  AddrSpace *spc = glb->getDefaultDataSpace();
+  uintb fullEncoding;
+  Address stringaddr = glb->resolveConstant(spc,val,ct->getSize(),op->getAddr(),fullEncoding);
   if (stringaddr.isInvalid()) return false;
   if (!glb->symboltab->getGlobalScope()->isReadOnly(stringaddr,1,Address()))
     return false;	     // Check that string location is readonly
@@ -1351,7 +1387,7 @@ bool PrintC::pushPtrCodeConstant(uintb val,const TypePointer *ct,
 				    const Varnode *vn,
 				    const PcodeOp *op)
 {
-  AddrSpace *spc = glb->getDefaultSpace();
+  AddrSpace *spc = glb->getDefaultCodeSpace();
   Funcdata *fd = (Funcdata *)0;
   val = AddrSpace::addressToByte(val,spc->getWordSize());
   fd = glb->symboltab->getGlobalScope()->queryFunction( Address(spc,val));
@@ -1549,6 +1585,21 @@ void PrintC::pushSymbol(const Symbol *sym,const Varnode *vn,const PcodeOp *op)
   else
     tokenColor = EmitXml::var_color;
   // FIXME: resolve scopes
+  if (sym->hasMergeProblems() && vn != (Varnode *)0) {
+    HighVariable *high = vn->getHigh();
+    if (high->isUnmerged()) {
+      ostringstream s;
+      s << sym->getName();
+      SymbolEntry *entry = high->getSymbolEntry();
+      if (entry != (SymbolEntry *)0) {
+	s << '$' << dec << entry->getSymbol()->getMapEntryPosition(entry);
+      }
+      else
+	s << "$$";
+      pushAtom(Atom(s.str(),vartoken,tokenColor,op,vn));
+      return;
+    }
+  }
   pushAtom(Atom(sym->getName(),vartoken,tokenColor,op,vn));
 }
 
@@ -1759,8 +1810,11 @@ void PrintC::emitPrototypeOutput(const FuncProto *proto,
   PcodeOp *op;
   Varnode *vn;
 
-  if (fd != (const Funcdata *)0)
-    op = fd->canonicalReturnOp();
+  if (fd != (const Funcdata *)0) {
+    op = fd->getFirstReturnOp();
+    if (op != (PcodeOp *)0 && op->numInput() < 2)
+      op = (PcodeOp *)0;
+  }
   else
     op = (PcodeOp *)0;
 
@@ -2045,7 +2099,7 @@ void PrintC::emitExpression(const PcodeOp *op)
     // If BRANCHIND, print switch( )
     // If CALL, CALLIND, CALLOTHER  print  call
     // If RETURN,   print return ( )
-  op->push(this);
+  op->getOpcode()->push(this,op,(PcodeOp *)0);
   recurse();
 }
 
@@ -2090,21 +2144,27 @@ bool PrintC::emitScopeVarDecls(const Scope *scope,int4 cat)
   MapIterator iter = scope->begin();
   MapIterator enditer = scope->end();
   for(;iter!=enditer;++iter) {
-    if ((*iter)->isPiece()) continue; // Don't do a partial entry
-    Symbol *sym = (*iter)->getSymbol();
+    const SymbolEntry *entry = *iter;
+    if (entry->isPiece()) continue; // Don't do a partial entry
+    Symbol *sym = entry->getSymbol();
     if (sym->getCategory() != cat) continue;
     if (sym->getName().size() == 0) continue;
     if (dynamic_cast<FunctionSymbol *>(sym) != (FunctionSymbol *)0)
       continue;
     if (dynamic_cast<LabSymbol *>(sym) != (LabSymbol *)0)
       continue;
+    if (sym->isMultiEntry()) {
+      if (sym->getFirstWholeMap() != entry)
+	continue;		// Only emit the first SymbolEntry for declaration of multi-entry Symbol
+    }
     notempty = true;
     emitVarDeclStatement(sym);
   }
   list<SymbolEntry>::const_iterator iter_d = scope->beginDynamic();
   list<SymbolEntry>::const_iterator enditer_d = scope->endDynamic();
   for(;iter_d!=enditer_d;++iter_d) {
-    if ((*iter_d).isPiece()) continue; // Don't do a partial entry
+    const SymbolEntry *entry = &(*iter_d);
+    if (entry->isPiece()) continue; // Don't do a partial entry
     Symbol *sym = (*iter_d).getSymbol();
     if (sym->getCategory() != cat) continue;
     if (sym->getName().size() == 0) continue;
@@ -2112,6 +2172,10 @@ bool PrintC::emitScopeVarDecls(const Scope *scope,int4 cat)
       continue;
     if (dynamic_cast<LabSymbol *>(sym) != (LabSymbol *)0)
       continue;
+    if (sym->isMultiEntry()) {
+      if (sym->getFirstWholeMap() != entry)
+	continue;
+    }
     notempty = true;
     emitVarDeclStatement(sym);
   }

@@ -343,7 +343,12 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
 				}
 			}
 
-			// Add public methods only once. Ignore inner classes.
+			// Add public methods (only once). Ignore inner classes.
+			//
+			// NOTE: We currently do not have a way to safely add protected methods.  Disabling
+			// python.security.respectJavaAccessibility and adding in protected methods in the below
+			// loop caused an InaccessibleObjectException for some users (relating to core Java 
+			// modules, not the GhidraScript class hierarchy).
 			if (!scriptMethodsInjected) {
 				for (Method method : scriptClass.getDeclaredMethods()) {
 					if (!method.getName().contains("$") &&
@@ -467,7 +472,7 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
 	}
 
 	/**
-	 * Returns a Map of property->string_substitution pairs.
+	 * Returns a Map of property-&gt;string_substitution pairs.
 	 *
 	 * @param cmd current command
 	 * @param includeBuiltins True if we should include python built-ins; otherwise, false.

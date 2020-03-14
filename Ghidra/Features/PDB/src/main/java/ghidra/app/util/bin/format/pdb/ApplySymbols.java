@@ -47,7 +47,7 @@ class ApplySymbols {
 		// static use only
 	}
 
-	static void applyTo(PdbParserNEW pdbParser, XmlPullParser xmlParser, TaskMonitor monitor,
+	static void applyTo(PdbParser pdbParser, XmlPullParser xmlParser, TaskMonitor monitor,
 			MessageLog log) throws CancelledException {
 
 		Program program = pdbParser.getProgram();
@@ -70,7 +70,8 @@ class ApplySymbols {
 			int length = XmlUtilities.parseInt(elem.getAttribute("length"));
 			String tag = elem.getAttribute("tag");
 //			String kind = elem.getAttribute("kind");
-			String datatype = elem.getAttribute("datatype");
+			String datatype =
+				SymbolUtilities.replaceInvalidChars(elem.getAttribute("datatype"), false);
 //			String undecorated  =  elem.getAttribute("undecorated");
 
 			tagSet.add(tag);
@@ -101,7 +102,7 @@ class ApplySymbols {
 			}
 
 			// Place compiler generated symbols (e.g., $LN9) within containing function when possible
-			if (name.startsWith("$") && !name.contains(Namespace.NAMESPACE_DELIMITER)) {
+			if (name.startsWith("$") && !name.contains(Namespace.DELIMITER)) {
 				Function f = functionManager.getFunctionContaining(address);
 				if (f != null && !f.getName().equals(name)) {
 					name = NamespaceUtils.getNamespaceQualifiedName(f, name, true);
@@ -116,9 +117,8 @@ class ApplySymbols {
 			}
 
 			// Don't create label for Data since a separate symbol should also exist with a better name
-			if (!"Data".equals(tag) &&
-				!pdbParser.createSymbol(address, name, forcePrimary, log, monitor)) {
-				log.appendMsg("Unable to create symbol " + name + " at " + address);
+			if (!"Data".equals(tag)) {
+				pdbParser.createSymbol(address, name, forcePrimary, log);
 			}
 
 			////////////
@@ -149,7 +149,7 @@ class ApplySymbols {
 			if (name.startsWith(MS_STRING_PREFIX)) {
 // TODO: Should this be handled by the demangler instead of here?
 				boolean isUnicode = isUnicode(name);
-				pdbParser.createString(isUnicode, address, log, monitor);
+				pdbParser.createString(isUnicode, address, log);
 			}
 			////////////
 			// Commented out the following for now, because it appears to be doing things it 
@@ -171,13 +171,13 @@ class ApplySymbols {
 //				}
 //			}
 			else if (isGuidLabel(name, address, program)) {
-				pdbParser.createData(address, new GuidDataType(), log, monitor);
+				pdbParser.createData(address, new GuidDataType(), log);
 			}
 			else if (tag.equals("Data")) {
 				if (datatype.length() == 0) {
 					continue;
 				}
-				pdbParser.createData(address, datatype, log, monitor);
+				pdbParser.createData(address, datatype, log);
 			}
 		}
 

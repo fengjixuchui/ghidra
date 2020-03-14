@@ -267,7 +267,6 @@ public class SimpleDiffUtility {
 	/**
 	 * Convert an address from the specified program to a comparable address in the
 	 * specified otherProgram.
-	 * @param program program which contains the specified address instance
 	 * @param addr address in program
 	 * @param otherProgram other program
 	 * @param exactMatchOnly if false and addr is an overlay address, a closest match will be returned
@@ -355,7 +354,7 @@ public class SimpleDiffUtility {
 		if (symbolType == SymbolType.FUNCTION) {
 			return getOtherFunctionSymbol(symbol, otherProgram, otherNamespace);
 		}
-		if (symbolType == SymbolType.CODE) {
+		if (symbolType == SymbolType.LABEL) {
 			return getOtherCodeSymbol(symbol, otherProgram, otherNamespace);
 		}
 		// In case any new SymbolTypes get added
@@ -522,7 +521,7 @@ public class SimpleDiffUtility {
 			return null;
 		}
 		SymbolType type = symbol.getSymbolType();
-		if ((type != SymbolType.FUNCTION && type != SymbolType.CODE) || !symbol.isExternal()) {
+		if ((type != SymbolType.FUNCTION && type != SymbolType.LABEL) || !symbol.isExternal()) {
 			return null;
 		}
 
@@ -693,8 +692,9 @@ public class SimpleDiffUtility {
 
 	/**
 	 * Find the variable symbol in otherProgram which corresponds to the specified varSym.
-	 * @param varSym variable symbol
-	 * @param otherProgram
+	 * @param symbol variable symbol
+	 * @param otherProgram other program
+	 * @return the variable symbol or null
 	 */
 	public static Symbol getVariableSymbol(Symbol symbol, Program otherProgram) {
 		Symbol otherParent = getSymbol(symbol.getParentSymbol(), otherProgram);
@@ -726,9 +726,10 @@ public class SimpleDiffUtility {
 	}
 
 	/**
-	 * Find the variable symbol in otherProgram which corresponds to the specified varSym.
+	 * Find the variable symbol in otherFunction which corresponds to the specified varSym.
 	 * @param varSym variable symbol
-	 * @param otherProgram
+	 * @param otherFunction other function
+	 * @return the variable symbol or null
 	 */
 	protected static Symbol getVariableSymbol(Symbol varSym, Function otherFunction) {
 		Program program = varSym.getProgram();
@@ -756,11 +757,11 @@ public class SimpleDiffUtility {
 	 * 1. First use offset matches
 	 * 2. Ordinal matches (for parameters only)
 	 * 3. Minimum or maximum address matches
-	 * @param otherSymTable
-	 * @param var
-	 * @param otherStorage
-	 * @param otherFunc
-	 * @return
+	 * @param otherSymTable other symbol table
+	 * @param var variable
+	 * @param otherStorage other variable storage
+	 * @param otherFunctionSymbol other function symbol
+	 * @return the overlapping variable or null
 	 */
 	protected static Variable getOverlappingVariable(SymbolTable otherSymTable, Variable var,
 			VariableStorage otherStorage, Symbol otherFunctionSymbol) {

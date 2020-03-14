@@ -33,6 +33,11 @@ import resources.icons.TranslateIcon;
  */
 public class Icons {
 
+	public static final ImageIcon EMPTY_ICON = ResourceManager.loadImage("images/EmptyIcon16.gif");
+
+	public static final ImageIcon HELP_ICON =
+		ResourceManager.loadImage("images/help-browser.png");
+
 	public static final ImageIcon ADD_ICON = ResourceManager.loadImage("images/Plus2.png");
 
 	public static final ImageIcon COLLAPSE_ALL_ICON =
@@ -78,6 +83,9 @@ public class Icons {
 
 	public static final ImageIcon SAVE_AS = ResourceManager.getImageIcon(
 		new DotDotDotIcon(ResourceManager.loadImage("images/Disk.png")));
+
+	public static final ImageIcon MAKE_SELECTION_ICON =
+		ResourceManager.loadImage("images/text_align_justify.png");
 
 	// Not necessarily re-usable, but this is needed for the help system; these should 
 	// probably be moved to the client that uses them, while updating the

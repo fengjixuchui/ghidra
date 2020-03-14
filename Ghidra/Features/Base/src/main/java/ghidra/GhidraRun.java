@@ -17,11 +17,11 @@ package ghidra;
 
 import java.io.File;
 
+import javax.swing.ToolTipManager;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import docking.DockingWindowManager;
-import docking.ToolTipManager;
 import docking.framework.SplashScreen;
 import ghidra.base.help.GhidraHelpService;
 import ghidra.framework.Application;
@@ -58,7 +58,7 @@ import ghidra.util.task.*;
  * indicates locations for where classes for plugins and data types should 
  * be searched; the Plugin path can include jar files just like a classpath. 
  * The Plugin path can be changed by using the <i>Edit Plugin Path</i> dialog, 
- * displayed from the <i>Edit->Edit Plugin Path...</i> menu option on the main 
+ * displayed from the <i>Edit-&gt;Edit Plugin Path...</i> menu option on the main 
  * Ghidra project window.
  * 
  * @see ghidra.GhidraLauncher
@@ -85,7 +85,6 @@ public class GhidraRun implements GhidraLaunchable {
 			updateSplashScreenStatusMessage("Populating Ghidra help...");
 			GhidraHelpService.install();
 
-			DockingWindowManager.enableDiagnosticActions(SystemUtilities.isInDevelopmentMode());
 			ExtensionUtils.cleanupUninstalledExtensions();
 
 			// Allows handling of old content which did not have a content type property
@@ -131,9 +130,8 @@ public class GhidraRun implements GhidraLaunchable {
 	}
 
 	private void initializeTooltips() {
-		ToolTipManager toolTipManager = ToolTipManager.sharedInstance();
-		int currentDelay = toolTipManager.getDismissDelay();
-		toolTipManager.setDismissDelay(currentDelay * 2);
+		int currentDelay = ToolTipManager.sharedInstance().getDismissDelay();
+		ToolTipManager.sharedInstance().setDismissDelay(currentDelay * 2);
 	}
 
 	/**

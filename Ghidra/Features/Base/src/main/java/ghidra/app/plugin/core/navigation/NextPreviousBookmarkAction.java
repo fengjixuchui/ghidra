@@ -26,6 +26,7 @@ import docking.ActionContext;
 import docking.action.*;
 import docking.menu.ActionState;
 import docking.menu.MultiStateDockingAction;
+import docking.tool.ToolConstants;
 import docking.widgets.EventTrigger;
 import ghidra.app.context.ListingActionContext;
 import ghidra.app.nav.Navigatable;
@@ -33,7 +34,6 @@ import ghidra.app.plugin.core.codebrowser.CodeViewerActionContext;
 import ghidra.app.services.GoToService;
 import ghidra.app.util.HelpTopics;
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.framework.plugintool.util.ToolConstants;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.*;
 import ghidra.util.HelpLocation;
@@ -58,13 +58,13 @@ public class NextPreviousBookmarkAction extends MultiStateDockingAction<String> 
 		this.tool = tool;
 
 		ToolBarData toolBarData =
-			new ToolBarData(bookmarkIcon, ToolConstants.NEXT_CODE_UNIT_NAVIGATION_MENU_GROUP);
+			new ToolBarData(bookmarkIcon, ToolConstants.TOOLBAR_GROUP_FOUR);
 		toolBarData.setToolBarSubGroup(subGroup);
 		setToolBarData(toolBarData);
 
 		MenuData menuData =
 			new MenuData(new String[] { ToolConstants.MENU_NAVIGATION, getMenuName() },
-				bookmarkIcon, ToolConstants.NEXT_CODE_UNIT_NAVIGATION_MENU_GROUP);
+				bookmarkIcon, ToolConstants.MENU_GROUP_NEXT_CODE_UNIT_NAV);
 		menuData.setMenuSubGroup(subGroup);
 		setMenuBarData(menuData);
 
@@ -97,12 +97,12 @@ public class NextPreviousBookmarkAction extends MultiStateDockingAction<String> 
 		Program program = bookmarkPlugin.getCurrentProgram();
 		BookmarkManager bookmarkManager = program.getBookmarkManager();
 		BookmarkType[] bookmarkTypes = bookmarkManager.getBookmarkTypes();
-
+		
 		for (BookmarkType bookmarkType : bookmarkTypes) {
 			ActionState<String> tempBookmarkType =
 				new ActionState<String>(bookmarkType.getTypeString(), bookmarkUnknownIcon,
 					bookmarkType.getTypeString());
-
+		
 			addActionState(tempBookmarkType);
 		}*/
 

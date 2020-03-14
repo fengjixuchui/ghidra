@@ -37,7 +37,7 @@ import ghidra.program.model.util.AcyclicCallGraphBuilder;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
-import ghidra.util.graph.DependencyGraph;
+import ghidra.util.graph.AbstractDependencyGraph;
 import ghidra.util.task.TaskMonitor;
 
 public class DecompilerParameterIdCmd extends BackgroundCommand {
@@ -74,7 +74,7 @@ public class DecompilerParameterIdCmd extends BackgroundCommand {
 			monitor.setMessage("Analyzing Call Hierarchy...");
 			AcyclicCallGraphBuilder builder =
 				new AcyclicCallGraphBuilder(program, entryPoints, true);
-			DependencyGraph<Address> graph = builder.getDependencyGraph(monitor);
+			AbstractDependencyGraph<Address> graph = builder.getDependencyGraph(monitor);
 			if (graph.isEmpty()) {
 				return true;
 			}
@@ -208,8 +208,9 @@ public class DecompilerParameterIdCmd extends BackgroundCommand {
 					boolean commitReturn = true;
 					if (!commitVoidReturn) {
 						DataType returnType = hfunc.getFunctionPrototype().getReturnType();
-						if (returnType instanceof VoidDataType)
+						if (returnType instanceof VoidDataType) {
 							commitReturn = false;
+						}
 					}
 					if (commitReturn) {
 						HighFunctionDBUtil.commitReturnToDatabase(hfunc, SourceType.ANALYSIS);
@@ -274,7 +275,7 @@ public class DecompilerParameterIdCmd extends BackgroundCommand {
 			if (sym.getName().equals("in_FS_OFFSET")) {
 				continue;
 			}
-			if (!sym.getHighVariable().getStorage().isRegisterStorage()) {
+			if (!sym.getStorage().isRegisterStorage()) {
 				continue;
 			}
 
@@ -294,7 +295,7 @@ public class DecompilerParameterIdCmd extends BackgroundCommand {
 
 			// TODO: should unaff_ be checked?
 
-			// TODO: should wierd stack references be checked?
+			// TODO: should weird stack references be checked?
 		}
 
 		return false;

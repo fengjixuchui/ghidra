@@ -18,6 +18,7 @@ package ghidra.app.plugin.core.navigation;
 import javax.swing.*;
 
 import docking.action.*;
+import docking.tool.ToolConstants;
 import ghidra.app.context.ListingActionContext;
 import ghidra.app.nav.Navigatable;
 import ghidra.app.plugin.core.codebrowser.CodeViewerActionContext;
@@ -25,7 +26,6 @@ import ghidra.app.plugin.core.codebrowser.actions.CodeViewerContextAction;
 import ghidra.app.services.GoToService;
 import ghidra.app.util.HelpTopics;
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.framework.plugintool.util.ToolConstants;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.AddressFieldLocation;
@@ -43,12 +43,12 @@ public abstract class AbstractNextPreviousAction extends CodeViewerContextAction
 		this.tool = tool;
 
 		ToolBarData toolBarData =
-			new ToolBarData(getIcon(), ToolConstants.NEXT_CODE_UNIT_NAVIGATION_MENU_GROUP);
+			new ToolBarData(getIcon(), ToolConstants.TOOLBAR_GROUP_FOUR);
 		toolBarData.setToolBarSubGroup(subGroup);
 		setToolBarData(toolBarData);
 		MenuData menuData =
 			new MenuData(new String[] { ToolConstants.MENU_NAVIGATION, getMenuName() }, getIcon(),
-				ToolConstants.NEXT_CODE_UNIT_NAVIGATION_MENU_GROUP);
+				ToolConstants.MENU_GROUP_NEXT_CODE_UNIT_NAV);
 		menuData.setMenuSubGroup(subGroup);
 		setMenuBarData(menuData);
 		setKeyBindingData(new KeyBindingData(getKeyStroke()));

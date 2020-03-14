@@ -176,10 +176,9 @@ public class ProgramMemoryUtil {
 		MemoryBlock[] blocks = mem.getBlocks();
 		MemoryBlock[] tmpBlocks = new MemoryBlock[blocks.length];
 		int j = 0;
-		for (int i = 0; i < blocks.length; i++) {
-			if ((blocks[i].isInitialized() && withBytes) ||
-				(!blocks[i].isInitialized() && !withBytes)) {
-				tmpBlocks[j++] = blocks[i];
+		for (MemoryBlock block : blocks) {
+			if ((block.isInitialized() && withBytes) || (!block.isInitialized() && !withBytes)) {
+				tmpBlocks[j++] = block;
 			}
 		}
 		MemoryBlock[] typeBlocks = new MemoryBlock[j];
@@ -297,7 +296,7 @@ public class ProgramMemoryUtil {
 		}
 
 		// Just looking for the offset into the segment now, not the whole segment/offset pair
-		if (addrSize == 20) {
+		if (toAddress instanceof SegmentedAddress) {
 			SegmentedAddress segAddr = (SegmentedAddress) toAddress;
 			currentSegment = (short) segAddr.getSegment();
 		}
@@ -322,10 +321,10 @@ public class ProgramMemoryUtil {
 				if (toAddress instanceof SegmentedAddress) {
 					short offsetShort = memory.getShort(a);
 					offsetShort &= offsetShort & 0xffff;
-					SegmentedAddress sega = ((SegmentedAddress) a);
-					short shortSega = (short) (sega.getSegment());
-					shortSega &= shortSega & 0xffff;
 					// this is checking to see if the ref is in the same segment as the toAddr - not sure this is needed anymore
+					// SegmentedAddress sega = ((SegmentedAddress) a);
+					// short shortSega = (short) (sega.getSegment());
+					// shortSega &= shortSega & 0xffff;
 					//	if (offsetShort == shortCurrentOffset) {
 					//*** commenting this out is making it find the instances of 46 01's not the 0a 00's - closer though
 					// check for the case where the reference includes both the segment and offset
@@ -413,11 +412,9 @@ public class ProgramMemoryUtil {
 	 * Direct references are only found at addresses that match the indicated alignment. 
 	 * @param program the program whose memory is to be checked.
 	 * @param alignment direct references are to only be found at the indicated alignment in memory.
-	 * @param toAddressSet the set of addresses that we are interested in finding references to.
-	 * @param directReferenceList the list to be populated with possible direct references
+	 * @param codeUnit the code unit to to search for references to.
 	 * @param monitor a task monitor for progress or to allow canceling.
-	 * @return list of addresses referring directly to the toAddress
-	 * @throws CancelledException if the user cancels via the monitor.
+	 * @return list of addresses referring directly to the toAddress.
 	 */
 	public static List<Address> findDirectReferencesCodeUnit(Program program, int alignment,
 			CodeUnit codeUnit, TaskMonitor monitor) {
@@ -441,8 +438,9 @@ public class ProgramMemoryUtil {
 		}
 
 		for (ReferenceAddressPair rap : directReferenceList) {
-			if (monitor.isCancelled())
+			if (monitor.isCancelled()) {
 				return null;
+			}
 			Address fromAddr = rap.getSource();
 			if (!results.contains(fromAddr)) {
 				results.add(fromAddr);
@@ -494,20 +492,37 @@ public class ProgramMemoryUtil {
 			monitor = TaskMonitorAdapter.DUMMY_MONITOR;
 		}
 
+		byte[] addressBytes = getDirectAddressBytes(program, toAddress);
+
+		byte[] shiftedAddressBytes = getShiftedDirectAddressBytes(program, toAddress);
+
+		Memory memory = program.getMemory();
+		Set<Address> dirRefsAddrs = new TreeSet<>();
+		findBytePattern(memory, blocks, addressBytes, alignment, dirRefsAddrs, monitor);
+
+		if (shiftedAddressBytes != null) { // assume shifted address not supported with segmented memory
+			findBytePattern(memory, blocks, shiftedAddressBytes, alignment, dirRefsAddrs, monitor);
+		}
+
+		return dirRefsAddrs;
+	}
+
+	/**
+	 * Get a representation of an address as it would appear in bytes in memory.
+	 * 
+	 * @param program program
+	 * @param toAddress target address
+	 * @return byte representation of toAddress
+	 */
+	public static byte[] getDirectAddressBytes(Program program, Address toAddress) {
+
 		Memory memory = program.getMemory();
 		boolean isBigEndian = memory.isBigEndian();
 
 		int addrSize = toAddress.getSize();
 
-		DataConverter dataConverter;
+		DataConverter dataConverter = DataConverter.getInstance(memory.isBigEndian());
 		byte[] addressBytes = new byte[addrSize / 8];
-
-		if (isBigEndian) {
-			dataConverter = new BigEndianDataConverter();
-		}
-		else {
-			dataConverter = new LittleEndianDataConverter();
-		}
 
 		if (toAddress instanceof SegmentedAddress) {
 			// Only search for offset (exclude segment)
@@ -537,6 +552,31 @@ public class ProgramMemoryUtil {
 				addressBytes, 0, addressBytes.length);
 		}
 
+		return addressBytes;
+	}
+
+	/**
+	 * returns shifted address bytes if they are different than un-shifted
+	 * 
+	 * @param program program
+	 * @param toAddress target address
+	 * @return shifted bytes, null if same as un-shifted
+	 */
+	public static byte[] getShiftedDirectAddressBytes(Program program, Address toAddress) {
+
+		byte[] addressBytes = getDirectAddressBytes(program, toAddress);
+
+		Memory memory = program.getMemory();
+		boolean isBigEndian = memory.isBigEndian();
+
+		DataConverter dataConverter;
+		if (isBigEndian) {
+			dataConverter = new BigEndianDataConverter();
+		}
+		else {
+			dataConverter = new LittleEndianDataConverter();
+		}
+
 		byte[] shiftedAddressBytes = null;
 		DataTypeManager dataTypeManager = program.getDataTypeManager();
 		DataOrganization dataOrganization = dataTypeManager.getDataOrganization();
@@ -555,24 +595,23 @@ public class ProgramMemoryUtil {
 			}
 		}
 
-		// don't need this anymore - finding all 16 bit addrs in whole prog
-//				AddressRange segmentRange = null;
-//				if (toAddress instanceof SegmentedAddress) {
-//					// Restrict search to currentSegment range
-//					SegmentedAddressSpace segSpace = (SegmentedAddressSpace) toAddress.getAddressSpace();
-//					segmentRange =
-//						new AddressRangeImpl(segSpace.getAddress(currentSegment, 0), segSpace.getAddress(
-//							currentSegment, 0xffff));
-//				}
+		return shiftedAddressBytes;
+	}
 
-		Set<Address> dirRefsAddrs = new TreeSet<>();
-		findBytePattern(memory, blocks, addressBytes, alignment, dirRefsAddrs, monitor);
+	public static byte[] getImageBaseOffsets32Bytes(Program program, int alignment,
+			Address toAddress) {
 
-		if (shiftedAddressBytes != null) { // assume shifted address not supported with segmented memory
-			findBytePattern(memory, blocks, shiftedAddressBytes, alignment, dirRefsAddrs, monitor);
+		Address imageBase = program.getImageBase();
+
+		long offsetValue = toAddress.subtract(imageBase);
+		int offsetSize = 4; // 32 bit offset
+		byte[] bytes = new byte[offsetSize];
+		for (int i = 0; i < offsetSize; i++) {
+			bytes[i] = (byte) offsetValue;
+			offsetValue >>= 8; // Shift by a single byte.
 		}
 
-		return dirRefsAddrs;
+		return bytes;
 	}
 
 	/**
@@ -624,18 +663,17 @@ public class ProgramMemoryUtil {
 		byte maskBytes[] = null;
 
 		MemoryBlock[] blocks = memory.getBlocks();
-		for (int i = 0; i < blocks.length; i++) {
-			if (!blocks[i].isInitialized()) {
+		for (MemoryBlock block : blocks) {
+			if (!block.isInitialized()) {
 				continue;
 			}
-			if (memoryRange != null &&
-				!memoryRange.intersects(blocks[i].getStart(), blocks[i].getEnd())) {
+			if (memoryRange != null && !memoryRange.intersects(block.getStart(), block.getEnd())) {
 				// skip blocks which do not correspond to currentSeg
 				continue;
 			}
 
-			Address start = blocks[i].getStart();
-			Address end = blocks[i].getEnd();
+			Address start = block.getStart();
+			Address end = block.getEnd();
 			Address found = null;
 			while (true) {
 				monitor.checkCanceled();

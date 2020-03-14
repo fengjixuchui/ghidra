@@ -25,8 +25,8 @@
 
 vector<ArchitectureCapability *> ArchitectureCapability::thelist;
 
-const uint4 ArchitectureCapability::majorversion = 3;
-const uint4 ArchitectureCapability::minorversion = 4;
+const uint4 ArchitectureCapability::majorversion = 4;
+const uint4 ArchitectureCapability::minorversion = 0;
 
 /// This builds a list of just the ArchitectureCapability extensions
 void ArchitectureCapability::initialize(void)
@@ -94,7 +94,6 @@ Architecture::Architecture(void)
   aggressive_ext_trim = false;
   readonlypropagate = false;
   infer_pointers = true;
-  pointer_lowerbound = 0x1000;
   funcptr_align = 0;
   flowoptions = 0;
   defaultfp = (ProtoModel *)0;
@@ -206,6 +205,7 @@ AddrSpace *Architecture::getSpaceBySpacebase(const Address &loc,int4 size) const
   int4 sz = numSpaces();
   for(int4 i=0;i<sz;++i) {
     id = getSpace(i);
+    if (id == (AddrSpace *)0) continue;
     int4 numspace = id->numSpacebase();
     for(int4 j=0;j<numspace;++j) {
       const VarnodeData &point(id->getSpacebase(j));
@@ -217,6 +217,42 @@ AddrSpace *Architecture::getSpaceBySpacebase(const Address &loc,int4 size) const
   }
   throw LowlevelError("Unable to find entry for spacebase register");
   return (AddrSpace *)0;
+}
+
+/// Look-up the laned register record associated with a specific storage location. Currently, the
+/// record is only associated with the \e size of the storage, not its address. If there is no
+/// associated record, null is returned.
+/// \param loc is the starting address of the storage location
+/// \param size is the size of the storage in bytes
+/// \return the matching LanedRegister record or null
+const LanedRegister *Architecture::getLanedRegister(const Address &loc,int4 size) const
+
+{
+  int4 min = 0;
+  int4 max = lanerecords.size() - 1;
+  while(min <= max) {
+    int4 mid = (min + max) / 2;
+    int4 sz = lanerecords[mid].getWholeSize();
+    if (sz < size)
+      min = mid + 1;
+    else if (size < sz)
+      max = mid - 1;
+    else
+      return &lanerecords[mid];
+  }
+  return (const LanedRegister *)0;
+}
+
+/// Return a size intended for comparison with a Varnode size to immediately determine if
+/// the Varnode is a potential laned register. If there are no laned registers for the architecture,
+/// -1 is returned.
+/// \return the size in bytes of the smallest laned register or -1.
+int4 Architecture::getMinimumLanedRegisterSize(void) const
+
+{
+  if (lanerecords.empty())
+    return -1;
+  return lanerecords[0].getWholeSize();
 }
 
 /// The default model is used whenever an explicit model is not known
@@ -269,21 +305,19 @@ void Architecture::collectBehaviors(vector<OpBehavior *> &behave) const
   }
 }
 
-/// A \b near pointer is some form of truncated pointer that needs
-/// \e segment or other information to fully form an address.
 /// This method searches for a user-defined segment op registered
-/// for the space
+/// for the given space.
 /// \param spc is the address space to check
-/// \return true if the space supports a segment operation
-bool Architecture::hasNearPointers(AddrSpace *spc) const
+/// \return the SegmentOp object or null
+SegmentOp *Architecture::getSegmentOp(AddrSpace *spc) const
 
 {
-  if (spc->getIndex() >= userops.numSegmentOps()) return false;
+  if (spc->getIndex() >= userops.numSegmentOps()) return (SegmentOp *)0;
   SegmentOp *segdef = userops.getSegmentOp(spc->getIndex());
-  if (segdef == (SegmentOp *)0) return false;
+  if (segdef == (SegmentOp *)0) return (SegmentOp *)0;
   if (segdef->getResolve().space != (AddrSpace *)0)
-    return true;
-  return false;
+    return segdef;
+  return (SegmentOp *)0;
 }
 
 /// Establish details of the prototype for a given function symbol
@@ -337,6 +371,7 @@ void Architecture::globalify(void)
 
   for(int4 i=0;i<nm;++i) {
     AddrSpace *spc = getSpace(i);
+    if (spc == (AddrSpace *)0) continue;
     if ((spc->getType() != IPTR_PROCESSOR)&&(spc->getType() != IPTR_SPACEBASE)) continue;
     symboltab->addRange(scope,spc,(uintb)0,spc->getHighest());
   }
@@ -563,6 +598,12 @@ void Architecture::buildInstructions(DocumentStorage &store)
   TypeOp::registerInstructions(inst,types,translate);
 }
 
+void Architecture::postSpecFile(void)
+
+{
+  cacheAddrSpaceProperties();
+}
+
 /// Once the processor is known, the Translate object can be built and
 /// fully initialized. Processor and compiler specific configuration is performed
 /// \param store will hold parsed configuration information
@@ -577,8 +618,6 @@ void Architecture::restoreFromSpec(DocumentStorage &store)
   insertSpace( new FspecSpace(this,translate,"fspec",numSpaces()));
   insertSpace( new IopSpace(this,translate,"iop",numSpaces()));
   insertSpace( new JoinSpace(this,translate,"join",numSpaces()));
-  if (translate->getDefaultSize() < 3) // For small architectures
-    pointer_lowerbound = 0x100;	// assume constants are pointers starting at a much lower bound
   userops.initialize(this);
   if (translate->getAlignment() <= 8)
     min_funcsymbol_size = translate->getAlignment();
@@ -601,6 +640,49 @@ void Architecture::initializeSegments(void)
     if (sop == (SegmentOp *)0) continue;
     SegmentedResolver *rsolv = new SegmentedResolver(this,sop->getSpace(),sop);
     insertResolver(sop->getSpace(),rsolv);
+  }
+}
+
+/// Determine the minimum pointer size for the space and whether or not there are near pointers.
+/// Set up an ordered list of inferable spaces (where constant pointers can be infered).
+/// Inferable spaces include the default space and anything explicitly listed
+/// in the cspec \<global> tag that is not a register space. An initial list of potential spaces is
+/// passed in that needs to be ordered, filtered, and deduplicated.
+void Architecture::cacheAddrSpaceProperties(void)
+
+{
+  vector<AddrSpace *> copyList = inferPtrSpaces;
+  copyList.push_back(getDefaultCodeSpace());	// Make sure the default code space is present
+  copyList.push_back(getDefaultDataSpace());	// Make sure the default data space is present
+  inferPtrSpaces.clear();
+  sort(copyList.begin(),copyList.end(),AddrSpace::compareByIndex);
+  AddrSpace *lastSpace = (AddrSpace *)0;
+  for(int4 i=0;i<copyList.size();++i) {
+    AddrSpace *spc = copyList[i];
+    if (spc == lastSpace) continue;
+    lastSpace = spc;
+    if (spc->getDelay() == 0) continue;		// Don't put in a register space
+    if (spc->getType() == IPTR_SPACEBASE) continue;
+    if (spc->isOtherSpace()) continue;
+    if (spc->isOverlay()) continue;
+    inferPtrSpaces.push_back(spc);
+  }
+
+  int4 defPos = -1;
+  for(int4 i=0;i<inferPtrSpaces.size();++i) {
+    AddrSpace *spc = inferPtrSpaces[i];
+    if (spc == getDefaultDataSpace())		// Make the default for inferring pointers the data space
+      defPos = i;
+    SegmentOp *segOp = getSegmentOp(spc);
+    if (segOp != (SegmentOp *)0) {
+      int4 val = segOp->getInnerSize();
+      markNearPointers(spc, val);
+    }
+  }
+  if (defPos > 0) {		// Make sure the default space comes first
+    AddrSpace *tmp = inferPtrSpaces[0];
+    inferPtrSpaces[0] = inferPtrSpaces[defPos];
+    inferPtrSpaces[defPos] = tmp;
   }
 }
 
@@ -707,20 +789,40 @@ void Architecture::parseGlobal(const Element *el)
   Scope *scope = buildGlobalScope();
   const List &list(el->getChildren());
   List::const_iterator iter;
-  
+
   for(iter=list.begin();iter!=list.end();++iter) {
     Range range;
     range.restoreXml(*iter,this);
-    symboltab->addRange(scope,range.getSpace(),range.getFirst(),range.getLast());
+    AddrSpace *spc = range.getSpace();
+    inferPtrSpaces.push_back(spc);
+    symboltab->addRange(scope,spc,range.getFirst(),range.getLast());
     if (range.getSpace()->isOverlayBase()) { // If the address space is overlayed
       // We need to duplicate the range being marked as global into the overlay space(s)
       int4 num = numSpaces();
       for(int4 i=0;i<num;++i) {
-	OverlaySpace *ospc = (OverlaySpace *)getSpace(i);
-	if (!ospc->isOverlay()) continue;
-	if (ospc->getBaseSpace() != range.getSpace()) continue;
-	symboltab->addRange(scope,ospc,range.getFirst(),range.getLast());
+        OverlaySpace *ospc = (OverlaySpace *)getSpace(i);
+        if (ospc == (AddrSpace *)0 || !ospc->isOverlay()) continue;
+        if (ospc->getBaseSpace() != range.getSpace()) continue;
+        symboltab->addRange(scope,ospc,range.getFirst(),range.getLast());
       }
+    }
+  }
+}
+
+//explictly add the OTHER space and any overlays to the global scope
+void Architecture::addOtherSpace(void)
+
+{
+  Scope *scope = buildGlobalScope();
+  AddrSpace *otherSpace = getSpaceByName("OTHER");
+  symboltab->addRange(scope,otherSpace,0,otherSpace->getHighest());
+  if (otherSpace->isOverlayBase()) {
+	int4 num = numSpaces();
+	for(int4 i=0;i<num;++i){
+      OverlaySpace *ospc = (OverlaySpace *)getSpace(i);
+      if (ospc->getBaseSpace() != otherSpace) continue;
+      if (ospc->getBaseSpace() != otherSpace) continue;
+      symboltab->addRange(scope,ospc,0,otherSpace->getHighest());
     }
   }
 }
@@ -791,6 +893,32 @@ void Architecture::parseIncidentalCopy(const Element *el)
   }
 }
 
+/// Look for \<register> tags that have a \e vector_lane_size attribute.
+/// Record these so that the decompiler can split large registers into appropriate lane size pieces.
+/// \param el is the XML element
+void Architecture::parseLaneSizes(const Element *el)
+
+{
+  vector<uint4> maskList;
+  const List &childList(el->getChildren());
+  List::const_iterator iter;
+
+  LanedRegister lanedRegister;		// Only allocate once
+  for(iter=childList.begin();iter!=childList.end();++iter) {
+    if (lanedRegister.restoreXml(*iter, this)) {
+      int4 sizeIndex = lanedRegister.getWholeSize();
+      while (maskList.size() <= sizeIndex)
+	maskList.push_back(0);
+      maskList[sizeIndex] |= lanedRegister.getSizeBitMask();
+    }
+  }
+  lanerecords.clear();
+  for(int4 i=0;i<maskList.size();++i) {
+    if (maskList[i] == 0) continue;
+    lanerecords.push_back(LanedRegister(i,maskList[i]));
+  }
+}
+
 /// Create a stack space and a stack-pointer register from this \<stackpointer> element
 /// \param el is the XML element
 void Architecture::parseStackPointer(const Element *el)
@@ -835,7 +963,7 @@ void Architecture::parseDeadcodeDelay(const Element *el)
   int4 delay = -1;
   s >> delay;
   if (delay >= 0)
-    setDeadcodeDelay(spc->getIndex(),delay);
+    setDeadcodeDelay(spc,delay);
   else
     throw LowlevelError("Bad <deadcodedelay> tag");
 }
@@ -942,32 +1070,41 @@ void Architecture::parseProcessorConfig(DocumentStorage &store)
   List::const_iterator iter;
   
   for(iter=list.begin();iter!=list.end();++iter) {
-    if ((*iter)->getName() == "programcounter") {
+    const string &elname( (*iter)->getName() );
+    if (elname == "programcounter") {
     }
-    else if ((*iter)->getName() == "volatile")
+    else if (elname == "volatile")
       parseVolatile(*iter);
-    else if ((*iter)->getName() == "incidentalcopy")
+    else if (elname == "incidentalcopy")
       parseIncidentalCopy(*iter);
-    else if ((*iter)->getName() == "context_data")
+    else if (elname == "context_data")
       context->restoreFromSpec(*iter,this);
-    else if ((*iter)->getName() == "jumpassist")
+    else if (elname == "jumpassist")
       userops.parseJumpAssist(*iter, this);
-    else if ((*iter)->getName() == "register_data") {
+    else if (elname == "segmentop")
+      userops.parseSegmentOp(*iter,this);
+    else if (elname == "register_data") {
+      parseLaneSizes(*iter);
     }
-    else if ((*iter)->getName() == "segmented_address") {
+    else if (elname == "data_space") {
+      const string &spaceName( (*iter)->getAttributeValue("space"));
+      AddrSpace *spc = getSpaceByName(spaceName);
+      if (spc == (AddrSpace *)0)
+        throw LowlevelError("Undefined space: "+spaceName);
+      setDefaultDataSpace(spc->getIndex());
     }
-    else if ((*iter)->getName() == "default_symbols") {
+    else if (elname == "segmented_address") {
     }
-    else if ((*iter)->getName() == "default_memory_blocks") {
+    else if (elname == "default_symbols") {
     }
-    else if ((*iter)->getName() == "address_shift_amount") {
+    else if (elname == "default_memory_blocks") {
     }
-    else if ((*iter)->getName() == "properties") {
+    else if (elname == "address_shift_amount") {
     }
-    else if ((*iter)->getName() == "data_space") {
+    else if (elname == "properties") {
     }
     else
-      throw LowlevelError("Unknown element in <processor_spec>: "+(*iter)->getName());
+      throw LowlevelError("Unknown element in <processor_spec>: "+elname);
   }
 }
 
@@ -1031,11 +1168,13 @@ void Architecture::parseCompilerConfig(DocumentStorage &store)
     else if (elname == "deadcodedelay")
       parseDeadcodeDelay(*iter);
   }
-                                        // <global> tags instantiate the base symbol table
-                                        // They need to know about all spaces, so it must come
-                                        // after parsing of <stackpointer> and <spacebase>
+  // <global> tags instantiate the base symbol table
+  // They need to know about all spaces, so it must come
+  // after parsing of <stackpointer> and <spacebase>
   for(int4 i=0;i<globaltags.size();++i)
     parseGlobal(globaltags[i]);
+
+  addOtherSpace();
       
   if (defaultfp == (ProtoModel *)0) {
     if (protoModels.size() == 1)
@@ -1113,16 +1252,17 @@ void Architecture::init(DocumentStorage &store)
   fillinReadOnlyFromLoader();
 }
 
-Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point)
+Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
 
 {
   int4 innersz = segop->getInnerSize();
-  if (sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
+  if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
   // In this case the address offset is not fully specified
   // we check if the rest is stored in a context variable
   // (as with near pointers)
     if (segop->getResolve().space != (AddrSpace *)0) {
       uintb base = glb->context->getTrackedValue(segop->getResolve(),point);
+      fullEncoding = (base << 8 * innersz) + (val & calc_mask(innersz));
       vector<uintb> seginput;
       seginput.push_back(val);
       seginput.push_back(base);
@@ -1131,6 +1271,7 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point)
     }
   }
   else { // For anything else, consider it a "far" pointer
+    fullEncoding = val;
     int4 outersz = segop->getBaseSize();
     uintb base = (val >> 8*innersz) & calc_mask(outersz);
     val = val & calc_mask(innersz);

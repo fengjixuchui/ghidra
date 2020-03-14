@@ -58,7 +58,6 @@ public class OldFunctionManager implements ErrorHandler {
 	 * @param errHandler the error handler
 	 * @param addrMap the address map
 	 * @throws VersionException if function manager's version does not match its expected version
-	 * @throws IOException if an i/o error occurs
 	 */
 	public OldFunctionManager(DBHandle dbHandle, ErrorHandler errHandler, AddressMap addrMap)
 			throws VersionException {
@@ -82,7 +81,7 @@ public class OldFunctionManager implements ErrorHandler {
 			throw new AssertException("Function manager already upgraded");
 		}
 		this.program = upgradeProgram;
-		dataManager = upgradeProgram.getDataManager();
+		dataManager = upgradeProgram.getDataTypeManager();
 
 		monitor.setMessage("Upgrading Functions...");
 		monitor.initialize(getFunctionCount());

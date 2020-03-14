@@ -19,6 +19,7 @@ import java.awt.Color;
 import java.awt.Font;
 import java.beans.PropertyEditor;
 import java.io.File;
+import java.lang.reflect.Constructor;
 import java.util.*;
 
 import javax.swing.KeyStroke;
@@ -98,9 +99,9 @@ public class ToolOptions extends AbstractOptions {
 			try {
 				Element elem = (Element) iter.next();
 				String optionName = elem.getAttributeValue("NAME");
-
 				Class<?> c = Class.forName(elem.getAttributeValue("CLASS"));
-				WrappedOption wo = (WrappedOption) c.newInstance();
+				Constructor<?> constructor = c.getDeclaredConstructor();
+				WrappedOption wo = (WrappedOption) constructor.newInstance();
 				wo.readState(new SaveState(elem));
 				Option option = createUnregisteredOption(optionName, wo.getOptionType(), null);
 				option.doSetCurrentValue(wo.getObject());// use doSet versus set so that it is not registered
@@ -116,6 +117,9 @@ public class ToolOptions extends AbstractOptions {
 	 * Return an XML element for the option names and values.
 	 * Note: only those options which have been explicitly set
 	 * will be included.
+	 * 
+	 * @param includeDefaultBindings true to include default key binding values in the xml 
+	 * @return the xml root element
 	 */
 	public Element getXmlRoot(boolean includeDefaultBindings) {
 		SaveState saveState = new SaveState(XML_ELEMENT_NAME);
@@ -268,7 +272,7 @@ public class ToolOptions extends AbstractOptions {
 
 	/**
 	 * Adds all the options name/value pairs to this Options.
-	 * @param newOptions
+	 * @param newOptions the new options into which the current options values will be placed
 	 */
 	public void copyOptions(Options newOptions) {
 		List<String> optionNames = newOptions.getOptionNames();

@@ -1,6 +1,5 @@
 /* ###
  * IP: GHIDRA
- * REVIEWED: YES
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +15,10 @@
  */
 package ghidra.program.database;
 
+import java.io.IOException;
+import java.util.*;
+
+import db.*;
 import ghidra.framework.Application;
 import ghidra.framework.data.DomainObjectAdapterDB;
 import ghidra.framework.model.*;
@@ -31,16 +34,11 @@ import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TaskMonitorAdapter;
 
-import java.io.IOException;
-import java.util.*;
-
-import db.*;
-
 /**
  * Database implementation for Data Type Archive. 
  */
-public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataTypeArchive,
-		DataTypeArchiveChangeManager {
+public class DataTypeArchiveDB extends DomainObjectAdapterDB
+		implements DataTypeArchive, DataTypeArchiveChangeManager {
 
 	/**
 	 * DB_VERSION should be incremented any time a change is made to the overall
@@ -54,7 +52,7 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 	 * UPGRADE_REQUIRED_BEFORE_VERSION should be changed to DB_VERSION any time the
 	 * latest version requires a forced upgrade (i.e., Read-only mode not supported
 	 * until upgrade is performed).  It is assumed that read-only mode is supported 
-	 * if the data's version is >= UPGRADE_REQUIRED_BEFORE_VERSION and <= DB_VERSION. 
+	 * if the data's version is &gt;= UPGRADE_REQUIRED_BEFORE_VERSION and &lt;= DB_VERSION. 
 	 */
 	private static final int UPGRADE_REQUIRED_BEFORE_VERSION = 1;
 
@@ -80,8 +78,8 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 
 	private final static Class<?>[] COL_CLASS = new Class[] { StringField.class };
 	private final static String[] COL_TYPES = new String[] { "Value" };
-	private final static Schema SCHEMA = new Schema(0, StringField.class, "Key", COL_CLASS,
-		COL_TYPES);
+	private final static Schema SCHEMA =
+		new Schema(0, StringField.class, "Key", COL_CLASS, COL_TYPES);
 
 	private ProjectDataTypeManager dataTypeManager;
 
@@ -98,8 +96,8 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 	 * @throws InvalidNameException 
 	 * @throws DuplicateNameException 
 	 */
-	public DataTypeArchiveDB(DomainFolder folder, String name, Object consumer) throws IOException,
-			DuplicateNameException, InvalidNameException {
+	public DataTypeArchiveDB(DomainFolder folder, String name, Object consumer)
+			throws IOException, DuplicateNameException, InvalidNameException {
 		super(new DBHandle(), name, 500, 1000, consumer);
 		this.name = name;
 
@@ -118,7 +116,9 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 			endTransaction(id, true);
 			clearUndo(false);
 
-			folder.createFile(name, this, TaskMonitorAdapter.DUMMY_MONITOR);
+			if (folder != null) {
+				folder.createFile(name, this, TaskMonitorAdapter.DUMMY_MONITOR);
+			}
 
 			success = true;
 		}
@@ -136,7 +136,7 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 	}
 
 	/**
-	 * Constructs a new DataTypeArchivemDB
+	 * Constructs a new DataTypeArchiveDB
 	 * @param dbh a handle to an open data type archive database.
 	 * @param openMode one of:
 	 * 		READ_ONLY: the original database will not be modified
@@ -195,9 +195,6 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 
 	}
 
-	/**
-	 * @see ghidra.framework.data.DomainObjectAdapter#setDomainFile(ghidra.framework.model.DomainFile)
-	 */
 	@Override
 	protected void setDomainFile(DomainFile df) {
 		super.setDomainFile(df);
@@ -207,8 +204,8 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 	private void propertiesRestore() {
 		Options pl = getOptions(ARCHIVE_INFO);
 		boolean origChangeState = changed;
-		pl.registerOption(CREATED_WITH_GHIDRA_VERSION, "4.3",
-			null, "Version of Ghidra used to create this program.");
+		pl.registerOption(CREATED_WITH_GHIDRA_VERSION, "4.3", null,
+			"Version of Ghidra used to create this program.");
 		pl.registerOption(DATE_CREATED, JANUARY_1_1970, null, "Date this program was created");
 //	    registerDefaultPointerSize();
 		changed = origChangeState;
@@ -223,9 +220,6 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 		changed = origChangeState;
 	}
 
-	/**
-	 * @see ghidra.framework.data.DomainObjectAdapterDB#propertyChanged(java.lang.String, java.lang.Object, java.lang.Object)
-	 */
 	@Override
 	protected boolean propertyChanged(String propertyName, Object oldValue, Object newValue) {
 		if (propertyName.endsWith(DEFAULT_POINTER_SIZE) && (newValue instanceof Integer)) {
@@ -258,7 +252,7 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 	}
 
 	/**
-	 * @see ghidra.program.model.listing.Program#getDefaultStoredPointerSize()
+	 * @see ghidra.program.model.listing.Program#getDefaultPointerSize()
 	 */
 	@Override
 	public int getDefaultPointerSize() {
@@ -369,16 +363,10 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 		fireEvent(new DataTypeArchiveChangeRecord(type, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * @see ghidra.framework.model.DomainObject#setName(java.lang.String)
-	 */
 	@Override
 	public void setName(String newName) {
 	}
 
-	/**
-	 * @see ghidra.framework.model.DomainObject#getDescription()
-	 */
 	@Override
 	public String getDescription() {
 		return "Data Type Archive";
@@ -506,9 +494,6 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 		dataTypeManager.archiveReady(openMode, monitor);
 	}
 
-	/**
-	 * @see ghidra.framework.data.DomainObjectAdapterDB#clearCache()
-	 */
 	@Override
 	protected void clearCache(boolean all) {
 		lock.acquire();
@@ -530,9 +515,6 @@ public class DataTypeArchiveDB extends DomainObjectAdapterDB implements DataType
 		fireEvent(new DomainObjectChangeRecord(DomainObject.DO_OBJECT_RESTORED));
 	}
 
-	/**
-	 * @see ghidra.framework.model.DomainObject#isChangeable()
-	 */
 	@Override
 	public boolean isChangeable() {
 		return changeable;

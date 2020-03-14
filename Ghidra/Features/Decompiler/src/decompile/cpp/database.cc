@@ -17,6 +17,8 @@
 #include "funcdata.hh"
 #include <ctype.h>
 
+uint8 Symbol::ID_BASE = 0x4000000000000000L;
+
 /// This SymbolEntry is unintegrated. An address or hash must be provided
 /// either directly or via restoreXml().
 /// \param sym is the Symbol \b this will be a map for
@@ -27,17 +29,6 @@ SymbolEntry::SymbolEntry(Symbol *sym)
   offset = 0;
   hash = 0;
   size = -1;
-}
-
-/// This constructor is for use with rangemap container.  It must be followed
-/// by an initialize() call.
-/// \param a is the first offset covered by the new SymbolEntry
-/// \param b is the last offset covered
-SymbolEntry::SymbolEntry(uintb a,uintb b)
-
-{
-  addr = Address(addr.getSpace(),a);
-  size = (b-a)+1;
 }
 
 /// This is used specifically for \e dynamic Symbol objects, where the storage location
@@ -64,12 +55,15 @@ SymbolEntry::SymbolEntry(Symbol *sym,uint4 exfl,uint8 h,int4 off,int4 sz,const R
 /// Assuming the boundary offsets have been specified with
 /// the constructor, fill in the rest of the data.
 /// \param data contains the raw initialization data
-void SymbolEntry::initialize(const EntryInitData &data)
+/// \param a is the starting offset of the entry
+/// \param b is the ending offset of the entry
+void SymbolEntry::initialize(const EntryInitData &data,uintb a,uintb b)
 
 {
+  addr = Address(data.space,a);
+  size = (b-a)+1;
   symbol = data.symbol;
   extraflags = data.extraflags;
-  addr = Address(data.space,addr.getOffset());
   offset = data.offset;
   uselimit = data.uselimit;
 }
@@ -238,6 +232,21 @@ bool Symbol::isNameUndefined(void) const
   return ((name.size()==15)&&(0==name.compare(0,7,"$$undef")));
 }
 
+/// If the given value is \b true, any Varnodes that map directly to \b this Symbol,
+/// will not be speculatively merged with other Varnodes.  (Required merges will still happen).
+/// \param val is the given boolean value
+void Symbol::setIsolated(bool val)
+
+{
+  if (val) {
+    dispflags |= isolate;
+    flags |= Varnode::typelock;		// Isolated Symbol must be typelocked
+    checkSizeTypeLock();
+  }
+  else
+    dispflags &= ~((uint4)isolate);
+}
+
 /// \return the first SymbolEntry
 SymbolEntry *Symbol::getFirstWholeMap(void) const
 
@@ -268,6 +277,57 @@ SymbolEntry *Symbol::getMapEntry(const Address &addr) const
   return (SymbolEntry *)0;
 }
 
+/// Among all the SymbolEntrys that map \b this entire Symbol, calculate
+/// the position of the given SymbolEntry within the list.
+/// \param entry is the given SymbolEntry
+/// \return its position within the list or -1 if it is not in the list
+int4 Symbol::getMapEntryPosition(const SymbolEntry *entry) const
+
+{
+  int4 pos = 0;
+  for(int4 i=0;i<mapentry.size();++i) {
+    const SymbolEntry *tmp = &(*mapentry[i]);
+    if (tmp == entry)
+      return pos;
+    if (entry->getSize() == type->getSize())
+      pos += 1;
+  }
+  return -1;
+}
+
+/// A value of 0 means the base Symbol name is visible and not overridden in the given use scope.
+/// A value of 1 means the base name may be overridden, but the parent scope name is not.
+/// The minimual number of names that distinguishes \b this Symbol uniquely within the
+/// use scope is returned.
+/// \param useScope is the given scope where \b this Symbol is being used
+/// \return the number of (extra) names needed to distinguish \b this Symbol
+int4 Symbol::getResolutionDepth(const Scope *useScope) const
+
+{
+  if (scope == useScope) return 0;	// Symbol is in scope where it is used
+  const Scope *distinguishScope = scope->findDistinguishingScope(useScope);
+  int4 depth = 0;
+  string distinguishName;
+  const Scope *terminatingScope;
+  if (distinguishScope == (const Scope *)0) {	// Symbol scope is ancestor of use scope
+    distinguishName = name;
+    terminatingScope = scope;
+  }
+  else {
+    distinguishName = distinguishScope->getName();
+    const Scope *currentScope = scope;
+    while(currentScope != distinguishScope) {	// For any scope up to the distinguishing scope
+      depth += 1;				// Print its name
+      currentScope = currentScope->getParent();
+    }
+    depth += 1;		// Also print the distinguishing scope name
+    terminatingScope = distinguishScope->getParent();
+  }
+  if (useScope->isNameUsed(distinguishName,terminatingScope))
+    depth += 1;		// Name was overridden, we need one more distinguishing name
+  return depth;
+}
+
 /// \param s is the output stream
 void Symbol::saveXmlHeader(ostream &s) const
 
@@ -286,18 +346,20 @@ void Symbol::saveXmlHeader(ostream &s) const
     a_v_b(s,"indirectstorage",true);
   if ((flags&Varnode::hiddenretparm)!=0)
     a_v_b(s,"hiddenretparm",true);
+  if ((dispflags&isolate)!=0)
+    a_v_b(s,"merge",false);
   int4 format = getDisplayFormat();
   if (format != 0) {
     s << " format=\"";
-    if (format == Symbol::force_hex)
+    if (format == force_hex)
       s << "hex\"";
-    else if (format == Symbol::force_dec)
+    else if (format == force_dec)
       s << "dec\"";
-    else if (format == Symbol::force_char)
+    else if (format == force_char)
       s << "char\"";
-    else if (format == Symbol::force_oct)
+    else if (format == force_oct)
       s << "oct\"";
-    else if (format == Symbol::force_bin)
+    else if (format == force_bin)
       s << "bin\"";
     else
       s << "hex\"";
@@ -313,50 +375,87 @@ void Symbol::restoreXmlHeader(const Element *el)
 {
   name.clear();
   category = -1;
+  symbolId = 0;
   for(int4 i=0;i<el->getNumAttributes();++i) {
-    if (el->getAttributeName(i)=="name")
-      name = el->getAttributeValue(i);
-    else if (el->getAttributeName(i)=="cat") {
-      istringstream s(el->getAttributeValue("cat"));
-      s.unsetf(ios::dec | ios::hex | ios::oct);
-      s >> category;
-    }
-    else if (el->getAttributeName(i)=="namelock") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::namelock;
-    }
-    else if (el->getAttributeName(i)=="typelock") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::typelock;
-    }
-    else if (el->getAttributeName(i)=="readonly") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::readonly;
-    }
-    else if (el->getAttributeName(i)=="volatile") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::volatil;
-    }
-    else if (el->getAttributeName(i)=="indirectstorage") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::indirectstorage;
-    }
-    else if (el->getAttributeName(i)=="hiddenretparm") {
-      if (xml_readbool(el->getAttributeValue(i)))
-	flags |= Varnode::hiddenretparm;
-    }
-    else if (el->getAttributeName(i)=="format") {
-      const string &formString( el->getAttributeValue(i));
-      if (formString == "hex")
-	dispflags |= Symbol::force_hex;
-      else if (formString == "dec")
-	dispflags |= Symbol::force_dec;
-      else if (formString == "char")
-	dispflags |= Symbol::force_char;
-      else if (formString == "oct")
-	dispflags |= Symbol::force_oct;
-      else if (formString == "bin")
-	dispflags |= Symbol::force_bin;
+    const string &attName(el->getAttributeName(i));
+    switch (attName[0]) {
+      case 'c':
+	if (attName == "cat") {
+	  istringstream s(el->getAttributeValue(i));
+	  s.unsetf(ios::dec | ios::hex | ios::oct);
+	  s >> category;
+	}
+	break;
+      case 'f':
+	if (attName == "format") {
+	  const string &formString(el->getAttributeValue(i));
+	  if (formString == "hex")
+	    dispflags |= force_hex;
+	  else if (formString == "dec")
+	    dispflags |= force_dec;
+	  else if (formString == "char")
+	    dispflags |= force_char;
+	  else if (formString == "oct")
+	    dispflags |= force_oct;
+	  else if (formString == "bin")
+	    dispflags |= force_bin;
+	}
+	break;
+      case 'h':
+	if (attName == "hiddenretparm") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::hiddenretparm;
+	}
+	break;
+      case 'i':
+	if (attName == "id") {
+	  istringstream s(el->getAttributeValue(i));
+	  s.unsetf(ios::dec | ios::hex | ios::oct);
+	  s >> symbolId;
+	  if ((symbolId >> 56) == (ID_BASE >> 56))
+	    symbolId = 0;		// Don't keep old internal id's
+	}
+	else if (attName == "indirectstorage") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::indirectstorage;
+	}
+	break;
+      case 'm':
+	if (attName == "merge") {
+	  if (!xml_readbool(el->getAttributeValue(i))) {
+	    dispflags |= isolate;
+	    flags |= Varnode::typelock;
+	  }
+	}
+	break;
+      case 'n':
+	if (attName == "name")
+	  name = el->getAttributeValue(i);
+	else if (attName == "namelock") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::namelock;
+	}
+	break;
+      case 'r':
+	if (attName == "readonly") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::readonly;
+	}
+	break;
+      case 't':
+	if (attName == "typelock") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::typelock;
+	}
+	break;
+      case 'v':
+	if (attName == "volatile") {
+	  if (xml_readbool(el->getAttributeValue(i)))
+	    flags |= Varnode::volatil;
+	}
+	break;
+      default:
+	break;
     }
   }
   if (category == 0) {
@@ -406,34 +505,44 @@ void Symbol::restoreXml(const Element *el)
   restoreXmlBody(list.begin());
 }
 
-void FunctionSymbol::buildType(int4 size)
+/// Get the number of bytes consumed by a SymbolEntry representing \b this Symbol.
+/// By default, this is the number of bytes consumed by the Symbol's data-type.
+/// This gives the amount of leeway a search has when the address queried does not match
+/// the exact address of the Symbol. With functions, the bytes consumed by a SymbolEntry
+/// may not match the data-type size.
+/// \return the number of bytes in a default SymbolEntry
+int4 Symbol::getBytesConsumed(void) const
+
+{
+  return type->getSize();
+}
+
+void FunctionSymbol::buildType(void)
 
 {
   TypeFactory *types = scope->getArch()->types;
   type = types->getTypeCode();
-  // Entries for functions have small size starting at the entry address
-  // of the function in order to deal with non-contiguous functions
-  // The size used to always be 1, but now we need sizes (slightly) larger than 1
-  // to accomodate pointer constants that encode extra information in the lower bit(s)
-  // of an otherwise aligned pointer.   If the encoding is not aprior detected, it is interpreted
-  // initially as a straight address that comes up 1 (or more) bytes off of the start of the function
-  // In order to detect this, we need to lay down a slightly larger size than 1
-  if (size > 1)
-    type = types->getTypeArray(size,type);
-
   flags |= Varnode::namelock | Varnode::typelock;
 }
 
 /// Build a function \e shell, made up of just the name of the function and
 /// a placeholder data-type, without the underlying Funcdata object.
+/// A SymbolEntry for a function has a small size starting at the entry address,
+/// in order to deal with non-contiguous functions.
+/// We need a size (slightly) larger than 1 to accommodate pointer constants that encode
+/// extra information in the lower bit(s) of an otherwise aligned pointer.
+/// If the encoding is not initially detected, it is interpreted
+/// as a straight address that comes up 1 (or more) bytes off of the start of the function
+/// In order to detect this, we need to lay down a slightly larger size than 1
 /// \param sc is the Scope that will contain the new Symbol
 /// \param nm is the name of the new Symbol
-/// \param size is the number of bytes the Symbol should consume
+/// \param size is the number of bytes a SymbolEntry should consume
 FunctionSymbol::FunctionSymbol(Scope *sc,const string &nm,int4 size)
   : Symbol(sc)
 {
   fd = (Funcdata *)0;
-  buildType(size);
+  consumeSize = size;
+  buildType();
   name = nm;
 }
 
@@ -441,7 +550,8 @@ FunctionSymbol::FunctionSymbol(Scope *sc,int4 size)
   : Symbol(sc)
 {
   fd = (Funcdata *)0;
-  buildType(size);
+  consumeSize = size;
+  buildType();
 }
 
 FunctionSymbol::~FunctionSymbol(void) {
@@ -462,10 +572,12 @@ void FunctionSymbol::saveXml(ostream &s) const
 
 {
   if (fd != (Funcdata *)0)
-    fd->saveXml(s,false);	// Save the function itself
+    fd->saveXml(s,symbolId,false);	// Save the function itself
   else {
     s << "<functionshell";
     a_v(s,"name",name);
+    if (symbolId != 0)
+      a_v_u(s,"id",symbolId);
     s << "/>\n";
   }
 }
@@ -475,15 +587,25 @@ void FunctionSymbol::restoreXml(const Element *el)
 {
   if (el->getName() == "function") {
     fd = new Funcdata("",scope,Address());
-    fd->restoreXml(el);
+    symbolId = fd->restoreXml(el);
     name = fd->getName();
-    if (type->getSize() < fd->getSize()) {
+    if (consumeSize < fd->getSize()) {
       if ((fd->getSize()>1)&&(fd->getSize() <= 8))
-	buildType(fd->getSize());
+	consumeSize = fd->getSize();
     }
   }
   else {			// functionshell
-    name = el->getAttributeValue("name");
+    symbolId = 0;
+    for(int4 i=0;i<el->getNumAttributes();++i) {
+      const string &attrName(el->getAttributeName(i));
+      if (attrName == "name")
+	name = el->getAttributeValue(i);
+      else if (attrName == "id") {
+	istringstream s(el->getAttributeValue(i));
+	s.unsetf(ios::dec | ios::hex | ios::oct);
+	s >> symbolId;
+      }
+    }
   }
 }
 
@@ -680,7 +802,7 @@ void Scope::attachScope(Scope *child)
 
 {
   child->parent = this;
-  pair<const ScopeKey,Scope *> value(ScopeKey(child->name,child->dedupId),child);
+  pair<const ScopeKey,Scope *> value(ScopeKey(child->name,child->uniqueId),child);
   pair<ScopeMap::iterator,bool> res;
   if (child->name.size()==0)
     throw LowlevelError("Non-global scope has empty name");
@@ -942,8 +1064,9 @@ SymbolEntry *Scope::addMap(const SymbolEntry &entry)
     entry.symbol->flags |= Varnode::persist;
 
   SymbolEntry *res;
+  int4 consumeSize = entry.symbol->getBytesConsumed();
   if (entry.addr.isInvalid())
-    res = addDynamicMapInternal(entry.symbol,Varnode::mapped,entry.hash,0,entry.symbol->getType()->getSize(),entry.uselimit);
+    res = addDynamicMapInternal(entry.symbol,Varnode::mapped,entry.hash,0,consumeSize,entry.uselimit);
   else {
     if (entry.uselimit.empty()) {
       entry.symbol->flags |= Varnode::addrtied;
@@ -951,7 +1074,7 @@ SymbolEntry *Scope::addMap(const SymbolEntry &entry)
       // can only happen if use is not limited
       entry.symbol->flags |= glb->symboltab->getProperty(entry.addr);
     }
-    res = addMapInternal(entry.symbol,Varnode::mapped,entry.addr,0,entry.symbol->getType()->getSize(),entry.uselimit);
+    res = addMapInternal(entry.symbol,Varnode::mapped,entry.addr,0,consumeSize,entry.uselimit);
     if (entry.addr.isJoin()) {
       // The address is a join,  we add extra SymbolEntry maps for each of the pieces
       JoinRecord *rec = glb->findJoin(entry.addr.getOffset());
@@ -1253,6 +1376,74 @@ void Scope::getNameSegments(vector<string> &vec) const
   }
 }
 
+/// Put the parent scopes of \b this into an array in order, starting with the global scope.
+/// This scope itself will not be in the array.
+/// \param vec is storage for the array of scopes
+void Scope::getScopePath(vector<Scope *> &vec) const
+
+{
+  int4 count = 0;
+  Scope *cur = parent;
+  while(cur != (Scope *)0) {	// Count number of elements in path
+    count += 1;
+    cur = cur->parent;
+  }
+  vec.resize(count);
+  cur = parent;
+  while(cur != (Scope *)0) {
+    count -= 1;
+    vec[count] = cur;
+    cur = cur->parent;
+  }
+}
+
+/// Test for the presence of a symbol with the given name in either \b this scope or
+/// an ancestor scope up to but not including the given terminating scope.
+/// If the name is used \b true is returned.
+/// \param nm is the given name to test
+/// \param op2 is the terminating ancestor scope (or null)
+bool Scope::isNameUsed(const string &nm,const Scope *op2) const
+
+{
+  const Scope *currentScope = this;
+  while(currentScope != op2) {
+    if (currentScope->isNameUsed(name))
+      return true;
+    currentScope = currentScope->parent;
+  }
+  return false;
+}
+
+/// Any two scopes share at least the \e global scope as a common ancestor. We find the first scope
+/// that is \e not in common.  The scope returned will always be an ancestor of \b this.
+/// If \b this is an ancestor of the other given scope, then null is returned.
+/// \param op2 is the other given Scope
+/// \return the first ancestor Scope that is not in common or null
+const Scope *Scope::findDistinguishingScope(const Scope *op2) const
+
+{
+  if (this == op2) return (Scope *)0;	// Quickly check most common cases
+  if (parent == op2) return this;
+  if (op2->parent == this) return op2;
+  if (parent == op2->parent) return this;
+  vector<Scope *> thisPath;
+  vector<Scope *> op2Path;
+  getScopePath(thisPath);
+  op2->getScopePath(op2Path);
+  int4 min = thisPath.size();
+  if (op2Path.size() < min)
+    min = op2Path.size();
+  for(int4 i=0;i<min;++i) {
+    if (thisPath[i] != op2Path[i])
+      return thisPath[i];
+  }
+  if (min < thisPath.size())
+    return thisPath[min];	// thisPath matches op2Path but is longer
+  if (min < op2Path.size())
+    return (Scope *)0;		// op2Path matches thisPath but is longer
+  return this;			// ancestor paths are identical (only base scopes differ)
+}
+
 /// The Symbol is created and added to any name map, but no SymbolEntry objects are created for it.
 /// \param name is the name of the new Symbol
 /// \param ct is a data-type to assign to the new Symbol
@@ -1450,6 +1641,45 @@ Symbol *Scope::addDynamicSymbol(const string &nm,Datatype *ct,const Address &cad
   return sym;
 }
 
+/// Create default name given information in the Symbol and possibly a representative Varnode.
+/// This method extracts the crucial properties and then uses the buildVariableName method to
+/// construct the actual name.
+/// \param sym is the given Symbol to name
+/// \param base is an index (which may get updated) used to uniquify the name
+/// \param vn is an optional (may be null) Varnode representative of the Symbol
+/// \return the default name
+string Scope::buildDefaultName(Symbol *sym,int4 &base,Varnode *vn) const
+
+{
+  if (vn != (Varnode *)0 && !vn->isConstant()) {
+    Address usepoint;
+    if (!vn->isAddrTied() && fd != (Funcdata *)0)
+      usepoint = vn->getUsePoint(*fd);
+    HighVariable *high = vn->getHigh();
+    if (sym->getCategory() == 0 || high->isInput()) {
+      int4 index = -1;
+      if (sym->getCategory()==0)
+	index = sym->getCategoryIndex()+1;
+      return buildVariableName(vn->getAddr(),usepoint,sym->getType(),index,vn->getFlags() | Varnode::input);
+    }
+    return buildVariableName(vn->getAddr(),usepoint,sym->getType(),base,vn->getFlags());
+  }
+  if (sym->numEntries() != 0) {
+    SymbolEntry *entry = sym->getMapEntry(0);
+    Address addr = entry->getAddr();
+    Address usepoint = entry->getFirstUseAddress();
+    uint4 flags = usepoint.isInvalid() ? Varnode::addrtied : 0;
+    if (sym->getCategory() == 0) {	// If this is a parameter
+	flags |= Varnode::input;
+	int4 index = sym->getCategoryIndex() + 1;
+	return buildVariableName(addr, usepoint, sym->getType(), index, flags);
+    }
+    return buildVariableName(addr, usepoint, sym->getType(), base, flags);
+  }
+  // Should never reach here
+  return buildVariableName(Address(), Address(), sym->getType(), base, 0);
+}
+
 /// \brief Is the given memory range marked as \e read-only
 ///
 /// Check for Symbols relative to \b this Scope that are marked as \e read-only,
@@ -1469,6 +1699,10 @@ bool Scope::isReadOnly(const Address &addr,int4 size,const Address &usepoint) co
 void ScopeInternal::addSymbolInternal(Symbol *sym)
 
 {
+  if (sym->symbolId == 0) {
+    sym->symbolId = Symbol::ID_BASE + (((uint8)uniqueId & 0xffff) << 40) + nextUniqueId;
+    nextUniqueId += 1;
+  }
   try {
     if (sym->name.size() == 0)
       sym->name = buildUndefinedName();
@@ -1516,6 +1750,11 @@ SymbolEntry *ScopeInternal::addMapInternal(Symbol *sym,uint4 exfl,const Address 
   list<SymbolEntry>::iterator iter = rangemap->insert(initdata,addr.getOffset(),lastaddress.getOffset());
   // Store reference to map in symbol
   sym->mapentry.push_back(iter);
+  if (sz == sym->type->getSize()) {
+    sym->wholeCount += 1;
+    if (sym->wholeCount == 2)
+      multiEntrySet.insert(sym);
+  }
   return &(*iter);
 }
 
@@ -1526,6 +1765,11 @@ SymbolEntry *ScopeInternal::addDynamicMapInternal(Symbol *sym,uint4 exfl,uint8 h
   list<SymbolEntry>::iterator iter = dynamicentry.end();
   --iter;
   sym->mapentry.push_back(iter); // Store reference to map entry in symbol
+  if (sz == sym->type->getSize()) {
+    sym->wholeCount += 1;
+    if (sym->wholeCount == 2)
+      multiEntrySet.insert(sym);
+  }
   return &dynamicentry.back();
 }
 
@@ -1590,6 +1834,7 @@ list<SymbolEntry>::iterator ScopeInternal::endDynamic(void)
 ScopeInternal::ScopeInternal(const string &nm,Architecture *g)
   : Scope(nm,g)
 {
+  nextUniqueId = 0;
   int4 numspaces = g->numSpaces();
   for(int4 i=0;i<numspaces;++i)
     maptable.push_back((EntryMap *)0);
@@ -1620,6 +1865,7 @@ void ScopeInternal::clear(void)
     Symbol *sym = *iter++;
     removeSymbol(sym);
   }
+  nextUniqueId = 0;
 }
 
 /// Look for NULL entries in the category tables. If there are,
@@ -1736,18 +1982,13 @@ void ScopeInternal::clearUnlockedCategory(int4 cat)
   }
 }
 
-void ScopeInternal::removeSymbol(Symbol *symbol)
+void ScopeInternal::removeSymbolMappings(Symbol *symbol)
 
 {
   vector<list<SymbolEntry>::iterator>::iterator iter;
 
-  if (symbol->category >= 0) {
-    vector<Symbol *> &list(category[symbol->category]);
-    list[symbol->catindex] = (Symbol *)0;
-    while((!list.empty())&&(list.back() == (Symbol *)0))
-      list.pop_back();
-  }
-
+  if (symbol->wholeCount > 1)
+    multiEntrySet.erase(symbol);
   // Remove each mapping of the symbol
   for(iter=symbol->mapentry.begin();iter!=symbol->mapentry.end();++iter) {
     AddrSpace *spc = (*(*iter)).getAddr().getSpace();
@@ -1758,6 +1999,20 @@ void ScopeInternal::removeSymbol(Symbol *symbol)
       rangemap->erase( *iter );
     }
   }
+  symbol->wholeCount = 0;
+  symbol->mapentry.clear();
+}
+
+void ScopeInternal::removeSymbol(Symbol *symbol)
+
+{
+  if (symbol->category >= 0) {
+    vector<Symbol *> &list(category[symbol->category]);
+    list[symbol->catindex] = (Symbol *)0;
+    while((!list.empty())&&(list.back() == (Symbol *)0))
+      list.pop_back();
+  }
+  removeSymbolMappings(symbol);
   nametree.erase(symbol);
   delete symbol;
 }
@@ -1765,10 +2020,14 @@ void ScopeInternal::removeSymbol(Symbol *symbol)
 void ScopeInternal::renameSymbol(Symbol *sym,const string &newname)
 
 {
-  nametree.erase(sym);		// Erase under old name 
+  nametree.erase(sym);		// Erase under old name
+  if (sym->wholeCount > 1)
+    multiEntrySet.erase(sym);	// The multi-entry set is sorted by name, remove
   string oldname = sym->name;
   sym->name = newname;
   insertNameTree(sym);
+  if (sym->wholeCount > 1)
+    multiEntrySet.insert(sym);	// Reenter into the multi-entry set now that name is changed
 }
 
 void ScopeInternal::retypeSymbol(Symbol *sym,Datatype *ct)
@@ -1791,6 +2050,7 @@ void ScopeInternal::retypeSymbol(Symbol *sym,Datatype *ct)
       // Remove the map entry
       rangemap->erase(iter);
       sym->mapentry.pop_back();	// Remove reference to map entry
+      sym->wholeCount = 0;
 
       // Now we are ready to change the type
       sym->type = ct;
@@ -2005,32 +2265,6 @@ SymbolEntry *ScopeInternal::findOverlap(const Address &addr,int4 size) const
   return (SymbolEntry *)0;
 }
 
-SymbolEntry *ScopeInternal::findBefore(const Address &addr) const
-
-{
-  EntryMap *rangemap = maptable[ addr.getSpace()->getIndex() ];
-  if (rangemap != (EntryMap *)0) {
-    EntryMap::const_iterator iter;
-    iter = rangemap->find_lastbefore(addr.getOffset());
-    if (iter != rangemap->end())
-      return &(*iter);
-  }
-  return (SymbolEntry *)0;
-}
-
-SymbolEntry *ScopeInternal::findAfter(const Address &addr) const
-
-{
-  EntryMap *rangemap = maptable[ addr.getSpace()->getIndex() ];
-  if (rangemap != (EntryMap *)0) {
-    EntryMap::const_iterator iter;
-    iter = rangemap->find_firstafter(addr.getOffset());
-    if (iter != rangemap->end())
-      return &(*iter);
-  }
-  return (SymbolEntry *)0;
-}
-
 void ScopeInternal::findByName(const string &name,vector<Symbol *> &res) const
 
 {
@@ -2041,6 +2275,15 @@ void ScopeInternal::findByName(const string &name,vector<Symbol *> &res) const
     res.push_back(sym);
     ++iter;
   }
+}
+
+bool ScopeInternal::isNameUsed(const string &name) const
+
+{
+  Symbol sym((Scope *)0,name,(Datatype *)0);
+  SymbolNameTree::const_iterator iter = nametree.lower_bound(&sym);
+  if (iter == nametree.end()) return false;
+  return ((*iter)->getName() == name);
 }
 
 string ScopeInternal::buildVariableName(const Address &addr,
@@ -2090,9 +2333,7 @@ string ScopeInternal::buildVariableName(const Address &addr,
       s << "in_" << regname;
   }
   else if ((flags & Varnode::input)!=0) { // Regular parameter
-    if (ct != (Datatype *)0)
-      ct->printNameBase(s);
-    s << "Parm" << dec << index;
+    s << "param_" << dec << index;
   }
   else if ((flags & Varnode::addrtied)!=0) {
     if (ct != (Datatype *)0)
@@ -2459,6 +2700,26 @@ void ScopeInternal::setCategory(Symbol *sym,int4 cat,int4 ind)
   list[sym->catindex] = sym;
 }
 
+/// Run through all the symbols whose name is undefined. Build a variable name, uniquify it, and
+/// rename the variable.
+/// \param base is the base index to start at for generating generic names
+void ScopeInternal::assignDefaultNames(int4 &base)
+
+{
+  SymbolNameTree::const_iterator iter;
+
+  Symbol testsym((Scope *)0,"$$undef",(Datatype *)0);
+
+  iter = nametree.upper_bound(&testsym);
+  while(iter != nametree.end()) {
+    Symbol *sym = *iter;
+    if (!sym->isNameUndefined()) break;
+    ++iter;		// Advance before renaming
+    string nm = buildDefaultName(sym, base, (Varnode *)0);
+    renameSymbol(sym, nm);
+  }
+}
+
 /// Check to make sure the Scope is a \e namespace then remove all
 /// its address ranges from the map.
 /// \param scope is the given Scope
@@ -2533,9 +2794,12 @@ void Database::attachScope(Scope *newscope,Scope *parent)
       throw LowlevelError("Multiple global scopes");
     if (newscope->name.size() != 0)
       throw LowlevelError("Global scope does not have empty name");
+    newscope->assignId(0);
     globalscope = newscope;
     return;
   }
+  newscope->assignId(nextScopeId);
+  nextScopeId += 1;
   parent->attachScope(newscope);
 }
 
@@ -2549,7 +2813,7 @@ void Database::deleteScope(Scope *scope)
     delete scope;
   }
   else {
-    ScopeKey key(scope->name,scope->dedupId);
+    ScopeKey key(scope->name,scope->uniqueId);
     ScopeMap::iterator iter = scope->parent->children.find(key);
     if (iter == scope->parent->children.end())
       throw LowlevelError("Could not remove parent reference to: "+scope->name);

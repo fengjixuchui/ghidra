@@ -16,14 +16,38 @@
 package ghidra.app.util.bin.format.dwarf4.next;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 
-import ghidra.app.util.bin.format.dwarf4.*;
+import ghidra.app.util.bin.format.dwarf4.DIEAggregate;
+import ghidra.app.util.bin.format.dwarf4.DWARFException;
+import ghidra.app.util.bin.format.dwarf4.DWARFUtil;
+import ghidra.app.util.bin.format.dwarf4.DebugInfoEntry;
 import ghidra.app.util.bin.format.dwarf4.encoding.DWARFEncoding;
 import ghidra.app.util.bin.format.dwarf4.encoding.DWARFTag;
 import ghidra.app.util.bin.format.dwarf4.expression.DWARFExpressionException;
 import ghidra.app.util.bin.format.dwarf4.next.DWARFDataTypeImporter.DWARFDataType;
-import ghidra.program.model.data.*;
+import ghidra.program.model.data.AbstractIntegerDataType;
+import ghidra.program.model.data.ArrayDataType;
+import ghidra.program.model.data.Category;
+import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeConflictHandler;
+import ghidra.program.model.data.DataTypeManager;
+import ghidra.program.model.data.DataTypePath;
+import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.FunctionDefinitionDataType;
+import ghidra.program.model.data.GenericCallingConvention;
+import ghidra.program.model.data.ParameterDefinition;
+import ghidra.program.model.data.ParameterDefinitionImpl;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.TypedefDataType;
+import ghidra.program.model.data.WideChar16DataType;
+import ghidra.program.model.data.WideChar32DataType;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.SystemUtilities;
@@ -48,12 +72,6 @@ public class DWARFDataTypeManager {
 	private Map<Long, DataTypePath> offsetToDTP = new HashMap<>();
 
 	private Map<DataTypePath, DWARFSourceInfo> dtpToSourceInfo = new HashMap<>();
-
-	/**
-	 * Marks some DWARF DIEs as strings so that the function importer can create better
-	 * data types using {@link #getStorageDataType(DIEAggregate, DataType)}
-	 */
-	private Set<Long> isDIEString = new HashSet<>();
 
 	/**
 	 * Mapping of base type names to their Ghidra datatype.
@@ -109,7 +127,7 @@ public class DWARFDataTypeManager {
 	 * <p>
 	 * A {@link DataTypeGraphComparator} is used to walk the 'impl' DataType object graph
 	 * in lock-step with the resultant 'db' DataType object graph, and the mapping between
-	 * the 'impl' object and its creator DIEA (held in {@link #currentImplDataTypeToDIE})
+	 * the 'impl' object and its creator DIEA (held in {@link DWARFDataType})
 	 * is used to create a mapping to the resultant 'db' DataType's path.
 	 *
 	 * @param diea DWARF {@link DIEAggregate} with datatype information that needs to be converted
@@ -205,25 +223,14 @@ public class DWARFDataTypeManager {
 	}
 
 	/**
-	 * Marks the DWARF DIE at the specified offset as a string.
-	 *
-	 * @param dieOffset the DWARF DIE offset.
-	 */
-	public void setAsStringType(long dieOffset) {
-		isDIEString.add(dieOffset);
-	}
-
-	/**
 	 * Returns a Ghidra {@link DataType} corresponding to the specified {@link DIEAggregate},
 	 * or the specified defaultValue if the DIEA param is null or does not map to an already
-	 * defined datatype (registered with {@link #addType(long, DataType, DWARFImportSummary)}).
+	 * defined datatype (registered with {@link #addDataType(long, DataType, DWARFSourceInfo)}).
 	 * <p>
 	 * @param diea {@link DIEAggregate} that defines a data type
 	 * @param defaultValue Ghidra {@link DataType} to return if the specified DIEA is null
 	 * or not already defined.
 	 * @return Ghidra {@link DataType}
-	 * @throws DWARFExpressionException
-	 * @throws IOException
 	 */
 	public DataType getDataType(DIEAggregate diea, DataType defaultValue) {
 		if (diea == null) {
@@ -250,7 +257,7 @@ public class DWARFDataTypeManager {
 	/**
 	 * Returns a Ghidra {@link DataType} corresponding to the specified DIE (based on its
 	 * offset), or the specified defaultValue if the DIE does not map to a defined
-	 * datatype (registered with {@link #addType(long, DataType, DWARFImportSummary)}).
+	 * datatype (registered with {@link #addDataType(long, DataType, DWARFSourceInfo)}).
 	 * <p>
 	 *
 	 * @param dieOffset offset of a DIE record that defines a data type
@@ -269,26 +276,6 @@ public class DWARFDataTypeManager {
 			return dataTypeClazz.cast(dt);
 		}
 		return null;
-	}
-
-	/**
-	 * Returns the {@link DataType} that the passed-in {@link DIEAggregate DIEA} defines,
-	 * except when it was a char array of undefined length, then it returns a StringDataType
-	 * that can be used to detect the size of the null-terminated string in memory.
-	 * @param diea
-	 * @param defaultValue
-	 * @return
-	 * @throws DWARFExpressionException
-	 * @throws IOException
-	 */
-	public DataType getStorageDataType(DIEAggregate diea, DataType defaultValue) {
-		if (diea == null) {
-			return defaultValue;
-		}
-		if (isDIEString.contains(diea.getOffset())) {
-			return new StringDataType(dataTypeManager);
-		}
-		return getDataType(diea, defaultValue);
 	}
 
 	/**
@@ -373,16 +360,6 @@ public class DWARFDataTypeManager {
 	 */
 	public DataType getOffsetType(int size) {
 		return findMatchingDataTypeBySize(baseDataTypeUntyped, size);
-	}
-
-	/**
-	 * Returns true if the data type is one of the standard character types.
-	 * @param dataType {@link DataType} to check
-	 * @return true if the specified datatype is one of the many char data types.
-	 */
-	public boolean isCharType(DataType dataType) {
-		return dataType instanceof CharDataType || dataType instanceof WideCharDataType ||
-			dataType instanceof WideChar16DataType || dataType instanceof WideChar32DataType;
 	}
 
 	/**
@@ -620,7 +597,7 @@ public class DWARFDataTypeManager {
 	 * Does the actual import work.  Updates the {@link #importSummary summary} object
 	 * with information about the types imported and errors encountered.
 	 *
-	 * @param TaskMonitor monitor to watch for cancel
+	 * @param monitor to watch for cancel
 	 * @throws IOException if errors are encountered reading data
 	 * @throws DWARFException if errors are encountered processing
 	 * @throws CancelledException if the {@link TaskMonitor} is canceled by the user.
@@ -777,7 +754,7 @@ public class DWARFDataTypeManager {
 	 * but the impls can't be shared without excessive over-engineering.
 	 * <p>
 	 * This impl uses DataType's that have already been resolved and committed to the DTM, and
-	 * a cache mapping entry of the DWARF die -> DataType has been registered via {@link #addDataType(long, DataType, DWARFSourceInfo)}.
+	 * a cache mapping entry of the DWARF die -&gt; DataType has been registered via {@link #addDataType(long, DataType, DWARFSourceInfo)}.
 	 * <p>
 	 * This approach is necessary because of speed issues that arise if the referred datatypes
 	 * are created from scratch from the DWARF information and then have to go through a

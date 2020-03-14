@@ -1,6 +1,5 @@
 /* ###
  * IP: GHIDRA
- * REVIEWED: YES
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +15,13 @@
  */
 package ghidra.app.plugin.core.calltree;
 
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.swing.tree.TreePath;
+
+import docking.widgets.tree.GTreeNode;
+import docking.widgets.tree.GTreeSlowLoadingNode;
 import ghidra.program.model.address.*;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
@@ -24,15 +30,6 @@ import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
-
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import javax.swing.tree.TreePath;
-
-import docking.widgets.tree.GTreeNode;
-import docking.widgets.tree.GTreeSlowLoadingNode;
-import docking.widgets.tree.support.GTreeFilter;
 
 public abstract class CallNode extends GTreeSlowLoadingNode {
 
@@ -51,11 +48,13 @@ public abstract class CallNode extends GTreeSlowLoadingNode {
 
 	/**
 	 * Returns a location that represents the caller of the callee.
+	 * @return the location
 	 */
 	public abstract ProgramLocation getLocation();
 
 	/**
 	 * Returns the address that for the caller of the callee.
+	 * @return the address
 	 */
 	public abstract Address getSourceAddress();
 
@@ -86,34 +85,23 @@ public abstract class CallNode extends GTreeSlowLoadingNode {
 	}
 
 	/**
-	 * Signals that this node should not override the equals method to treat all nodes with the
-	 * same name as the same.  When the user wants to see duplicates, each node should rely on
-	 * Java's default notion of equality; otherwise, the JTree goes out to lunch.
+	 * True allows this node to contains children with the same name
+	 * 
+	 * @param allowDuplicates true to allow duplicate nodes
 	 */
 	protected void setAllowsDuplicates(boolean allowDuplicates) {
 		this.allowDuplicates = allowDuplicates;
 	}
 
-	@Override
-	public boolean equals(Object other) {
+	protected void addNode(List<GTreeNode> nodes, GTreeNode node) {
 		if (allowDuplicates) {
-			return super.equals(other);
+			nodes.add(node);
+			return;
 		}
 
-		if (other == this) {
-			return true;
+		if (!nodes.contains(node)) {
+			nodes.add(node);
 		}
-
-		if (other == null) {
-			return false;
-		}
-
-		if (!getClass().equals(other.getClass())) {
-			return false;
-		}
-
-		CallNode otherCallNode = (CallNode) other;
-		return getName().equals(otherCallNode.getName());
 	}
 
 	protected class CallNodeComparator implements Comparator<GTreeNode> {
@@ -124,13 +112,11 @@ public abstract class CallNode extends GTreeSlowLoadingNode {
 	}
 
 	@Override
-	public void filter(GTreeFilter filter, TaskMonitor monitor, int min, int max)
-			throws CancelledException {
+	public int loadAll(TaskMonitor monitor) throws CancelledException {
 		if (depth() > filterDepth.get()) {
-			doSetActiveChildren(new ArrayList<GTreeNode>());
-			return;
+			return 1;
 		}
-		super.filter(filter, monitor, min, max);
+		return super.loadAll(monitor);
 	}
 
 	private int depth() {

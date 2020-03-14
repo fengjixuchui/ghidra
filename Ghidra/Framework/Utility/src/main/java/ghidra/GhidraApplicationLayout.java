@@ -22,6 +22,7 @@ import generic.jar.ResourceFile;
 import ghidra.framework.ApplicationProperties;
 import ghidra.framework.GModule;
 import ghidra.util.SystemUtilities;
+import utilities.util.FileUtilities;
 import utility.application.ApplicationLayout;
 import utility.application.ApplicationUtilities;
 import utility.module.ModuleUtilities;
@@ -63,6 +64,9 @@ public class GhidraApplicationLayout extends ApplicationLayout {
 		// Extensions
 		extensionInstallationDir = findExtensionInstallationDirectory();
 		extensionArchiveDir = findExtensionArchiveDirectory();
+
+		// Patch directory
+		patchDir = findPatchDirectory();
 	}
 
 	/**
@@ -142,27 +146,53 @@ public class GhidraApplicationLayout extends ApplicationLayout {
 		Collection<ResourceFile> moduleRootDirectories =
 			ModuleUtilities.findModuleRootDirectories(applicationRootDirs, new ArrayList<>());
 
-		// If Ghidra was launched from our Eclipse GhidraDev plugin, we want to add the
-		// Eclipse module project (and it's dependent projects) to the list of module root 
-		// directories so Ghidra can discover them.
-		String eclipseProjectDirProperty = System.getProperty("eclipse.project.dir");
-		if (eclipseProjectDirProperty != null && !eclipseProjectDirProperty.isEmpty()) {
-			ResourceFile eclipseProjectDir = new ResourceFile(eclipseProjectDirProperty);
-			if (ModuleUtilities.isModuleDirectory(eclipseProjectDir)) {
-				moduleRootDirectories.add(eclipseProjectDir);
+		// Examine the classpath to look for modules outside of the application root directories.
+		// These might exist if Ghidra was launched from an Eclipse project that resides
+		// external to the Ghidra installation.
+		for (String entry : System.getProperty("java.class.path", "").split(File.pathSeparator)) {
+			final ResourceFile classpathEntry = new ResourceFile(entry);
+
+			// We only care about directories (skip jars)
+			if (!classpathEntry.isDirectory()) {
+				continue;
 			}
-		}
-		String eclipseProjectDependencies = System.getProperty("eclipse.project.dependencies");
-		if (eclipseProjectDependencies != null && !eclipseProjectDependencies.isEmpty()) {
-			for (String path : eclipseProjectDependencies.split(File.pathSeparator)) {
-				ResourceFile eclipseProjectDir = new ResourceFile(path);
-				if (ModuleUtilities.isModuleDirectory(eclipseProjectDir)) {
-					moduleRootDirectories.add(eclipseProjectDir);
-				}
+
+			// Skip classpath entries that live in an application root directory...we've already
+			// found those.
+			if (applicationRootDirs.stream()
+					.anyMatch(dir -> FileUtilities.isPathContainedWithin(
+						dir.getFile(false), classpathEntry.getFile(false)))) {
+				continue;
+			}
+
+			// We are going to assume that the classpath entry is in a subdirectory of the module
+			// directory (i.e., bin/), so only check parent directory for the module.
+			ResourceFile classpathEntryParent = classpathEntry.getParentFile();
+			if (classpathEntryParent != null &&
+				ModuleUtilities.isModuleDirectory(classpathEntryParent)) {
+				moduleRootDirectories.add(classpathEntryParent);
 			}
 		}
 
 		return ModuleUtilities.findModules(applicationRootDirs, moduleRootDirectories);
+	}
+
+	/**
+	 * Returns the directory that allows users to add jar and class files to override existing
+	 * distribution files
+	 * @return the patch dir; null if not in a distribution
+	 */
+	protected ResourceFile findPatchDirectory() {
+
+		if (SystemUtilities.isInDevelopmentMode()) {
+			return null;
+		}
+
+		if (applicationInstallationDir == null) {
+			return null;
+		}
+
+		return new ResourceFile(applicationInstallationDir, "Ghidra/patch");
 	}
 
 	/**

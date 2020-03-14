@@ -26,6 +26,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import docking.ComponentProvider;
 import docking.DialogComponentProvider;
+import docking.widgets.checkbox.GCheckBox;
 import docking.widgets.combobox.GhidraComboBox;
 import ghidra.app.cmd.label.*;
 import ghidra.framework.cmd.CompoundCmd;
@@ -171,24 +172,39 @@ public class AddEditDialog extends DialogComponentProvider {
 		if (parentPath == null) {
 			return rootNamespace;
 		}
-		String relativeParentPath = parentPath.getPath();
 
-		SymbolPath absoluteParentPath =
-			new SymbolPath(rootNamespace.getSymbol()).append(parentPath);
-		Namespace parentNamespace = NamespaceUtils.getNamespace(program, absoluteParentPath, addr);
-		if (parentNamespace != null) {
-			return parentNamespace;
+		//
+		// Prefer a non-function namespace.  This allows us to put a function inside of a namespace
+		// sharing the same name.
+		//
+		SymbolPath fullPath = new SymbolPath(rootNamespace.getSymbol()).append(parentPath);
+		Namespace nonFunctionNs = NamespaceUtils.getNonFunctionNamespace(program, fullPath);
+		if (nonFunctionNs != null) {
+			return nonFunctionNs;
 		}
 
-		// run the create namespaces command
-		CreateNamespacesCmd command =
-			new CreateNamespacesCmd(relativeParentPath, rootNamespace, SourceType.USER_DEFINED);
-
-		if (tool.execute(command, program)) {
-			return command.getNamespace();
+		//
+		// At this point we can either reuse an existing function namespace or we have to create
+		// a new non-function namespaces, depending upon the names being used.  Only use an 
+		// existing function as a namespace if none of namespace path entries match the function
+		// name.
+		//
+		String name = symbolPath.getName();
+		if (!parentPath.containsPathEntry(name)) {
+			Namespace functionNamespace =
+				NamespaceUtils.getFunctionNamespaceContaining(program, parentPath, addr);
+			if (functionNamespace != null) {
+				return functionNamespace;
+			}
 		}
 
-		setStatusText(command.getStatusMsg());
+		CreateNamespacesCmd cmd =
+			new CreateNamespacesCmd(parentPath.getPath(), rootNamespace, SourceType.USER_DEFINED);
+		if (tool.execute(cmd, program)) {
+			return cmd.getNamespace();
+		}
+
+		setStatusText(cmd.getStatusMsg());
 		return null;
 	}
 
@@ -432,14 +448,14 @@ public class AddEditDialog extends DialogComponentProvider {
 		comboBox.setEnterKeyForwarding(true);
 		namespaceChoices = comboBox;
 
-		primaryCheckBox = new JCheckBox("Primary");
+		primaryCheckBox = new GCheckBox("Primary");
 		primaryCheckBox.setMnemonic('P');
 		primaryCheckBox.setToolTipText(
 			"Make this label be the one that shows up in references to this location.");
-		entryPointCheckBox = new JCheckBox("Entry Point  ");
+		entryPointCheckBox = new GCheckBox("Entry Point  ");
 		entryPointCheckBox.setMnemonic('E');
 		entryPointCheckBox.setToolTipText("Mark this location as an external entry point.");
-		pinnedCheckBox = new JCheckBox("Pinned");
+		pinnedCheckBox = new GCheckBox("Pinned");
 		pinnedCheckBox.setMnemonic('A');
 		pinnedCheckBox.setToolTipText(
 			"Do not allow this label to move when the image base changes or a memory block is moved.");

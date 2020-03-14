@@ -71,6 +71,19 @@ bool ParamEntry::contains(const ParamEntry &op2) const
   return true;
 }
 
+/// \param addr is the starting address of the potential containing range
+/// \param sz is the number of bytes in the range
+/// \return \b true if the entire ParamEntry fits inside the range
+bool ParamEntry::containedBy(const Address &addr,int4 sz) const
+
+{
+  if (spaceid != addr.getSpace()) return false;
+  if (addressbase < addr.getOffset()) return false;
+  uintb entryoff = addressbase + size-1;
+  uintb rangeoff = addr.getOffset() + sz-1;
+  return (entryoff <= rangeoff);
+}
+
 /// Check if the given memory range is contained in \b this.
 /// If it is contained, return the endian aware offset of the containment.
 /// I.e. if the least significant byte of the given range falls on the least significant
@@ -100,16 +113,19 @@ int4 ParamEntry::justifiedContain(const Address &addr,int4 sz) const
     return entry.justifiedContain(size,addr,sz,((flags&force_left_justify)!=0));
   }
   if (spaceid != addr.getSpace()) return -1;
-  if (addr.getOffset() < addressbase) return -1;
-  uintb endaddr = addr.getOffset() + sz - 1;
-  if (endaddr < addr.getOffset()) return -1; // Don't allow wrap around
+  uintb startaddr = addr.getOffset();
+  if (startaddr < addressbase) return -1;
+  uintb endaddr = startaddr + sz - 1;
+  if (endaddr < startaddr) return -1; // Don't allow wrap around
   if (endaddr > (addressbase+size-1)) return -1;
+  startaddr -= addressbase;
+  endaddr -= addressbase;
   if (!isLeftJustified()) {   // For right justified (big endian), endaddr must be aligned
     int4 res = (int4)((endaddr+1) % alignment);
     if (res==0) return 0;
     return (alignment-res);
   }
-  return (int4)(addr.getOffset() % alignment);
+  return (int4)(startaddr % alignment);
 }
 
 /// \brief Calculate the containing memory range
@@ -147,7 +163,7 @@ bool ParamEntry::getContainer(const Address &addr,int4 sz,VarnodeData &res) cons
     res.size = size;
     return true;
   }
-  uintb al = addr.getOffset() % alignment;
+  uintb al = (addr.getOffset() - addressbase) % alignment;
   res.space = spaceid;
   res.offset = addr.getOffset() - al;
   res.size = (int4)(endaddr.getOffset()-res.offset) + 1;
@@ -190,7 +206,8 @@ OpCode ParamEntry::assumedExtension(const Address &addr,int4 sz,VarnodeData &res
   }
   else {	// Otherwise take up whole alignment
     res.space = spaceid;
-    res.offset = addr.getOffset() - addr.getOffset() % alignment;
+    int4 alignAdjust = (addr.getOffset() - addressbase) % alignment;
+    res.offset = addr.getOffset() - alignAdjust;
     res.size = alignment;
   }
   if ((flags & smallsize_zext)!=0)
@@ -216,7 +233,7 @@ int4 ParamEntry::getSlot(const Address &addr,int4 skip) const
 {
   int4 res = group;
   if (alignment != 0) {
-    uintb diff = addr.getOffset() + skip - addressbase;	// Assume addressbase % alignment == 0
+    uintb diff = addr.getOffset() + skip - addressbase;
     int4 baseslot = (int4)diff / alignment;
     if (isReverseStack())
       res += (numslots -1) - baseslot;
@@ -352,8 +369,8 @@ void ParamEntry::restoreXml(const Element *el,const AddrSpaceManager *manage,boo
   spaceid = addr.getSpace();
   addressbase = addr.getOffset();
   if (alignment != 0) {
-    if ((addressbase % alignment) != 0)
-      throw LowlevelError("Stack <pentry> address must match alignment");
+//    if ((addressbase % alignment) != 0)
+//      throw LowlevelError("Stack <pentry> address must match alignment");
     numslots = size / alignment;
   }
   if (spaceid->isReverseJustified()) {
@@ -379,17 +396,18 @@ void ParamEntry::restoreXml(const Element *el,const AddrSpaceManager *manage,boo
 /// what portion(s) of the joined parameter are overlapped. This method sets flags on \b this
 /// to indicate the overlap.
 /// \param entry is the full parameter list to check for overlaps with \b this
-void ParamEntry::extraChecks(vector<ParamEntry> &entry)
+void ParamEntry::extraChecks(list<ParamEntry> &entry)
 
 {
   if (joinrec == (JoinRecord *)0) return;		// Nothing to do if not multiprecision
   if (joinrec->numPieces() != 2) return;
   const VarnodeData &highPiece(joinrec->getPiece(0));
   bool seenOnce = false;
-  for(int4 i=0;i<entry.size();++i) {			// Search for high piece, used as whole/low in another entry
-    AddrSpace *spc = entry[i].getSpace();
-    uintb off = entry[i].getBase();
-    int4 sz = entry[i].getSize();
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {	// Search for high piece, used as whole/low in another entry
+    AddrSpace *spc = (*iter).getSpace();
+    uintb off = (*iter).getBase();
+    int4 sz = (*iter).getSize();
     if ((highPiece.offset == off)&&(highPiece.space == spc)&&(highPiece.size == sz)) {
       if (seenOnce) throw LowlevelError("Extra check hits twice");
       seenOnce = true;
@@ -410,21 +428,76 @@ ParamListStandard::ParamListStandard(const ParamListStandard &op2)
   pointermax = op2.pointermax;
   thisbeforeret = op2.thisbeforeret;
   nonfloatgroup = op2.nonfloatgroup;
+  populateResolver();
+}
+
+ParamListStandard::~ParamListStandard(void)
+
+{
+  for(int4 i=0;i<resolverMap.size();++i) {
+    ParamEntryResolver *resolver = resolverMap[i];
+    if (resolver != (ParamEntryResolver *)0)
+      delete resolver;
+  }
 }
 
 /// Find the (first) entry containing the given memory range
 /// \param loc is the starting address of the range
 /// \param size is the number of bytes in the range
-/// \return the index of the matching ParamEntry or -1 if none exists
-int4 ParamListStandard::findEntry(const Address &loc,int4 size) const
+/// \return the pointer to the matching ParamEntry or null if no match exists
+const ParamEntry *ParamListStandard::findEntry(const Address &loc,int4 size) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    if (entry[i].getMinSize() > size) continue;
-    if (entry[i].justifiedContain(loc,size)==0)	// Make sure the range is properly justified in entry
-      return i;
+  int4 index = loc.getSpace()->getIndex();
+  if (index >= resolverMap.size())
+    return (const ParamEntry *)0;
+  ParamEntryResolver *resolver = resolverMap[index];
+  if (resolver == (ParamEntryResolver *)0)
+    return (const ParamEntry *)0;
+  pair<ParamEntryResolver::const_iterator,ParamEntryResolver::const_iterator> res;
+  res = resolver->find(loc.getOffset());
+  while(res.first != res.second) {
+    const ParamEntry *testEntry = (*res.first).getParamEntry();
+    ++res.first;
+    if (testEntry->getMinSize() > size) continue;
+    if (testEntry->justifiedContain(loc,size)==0)	// Make sure the range is properly justified in entry
+      return testEntry;
   }
-  return -1;
+  return (const ParamEntry *)0;
+}
+
+int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
+
+{
+  int4 index = loc.getSpace()->getIndex();
+  if (index >= resolverMap.size())
+    return 0;
+  ParamEntryResolver *resolver = resolverMap[index];
+  if (resolver == (ParamEntryResolver *)0)
+    return 0;
+  pair<ParamEntryResolver::const_iterator,ParamEntryResolver::const_iterator> iterpair;
+  iterpair = resolver->find(loc.getOffset());
+  int4 res = 0;
+  while(iterpair.first != iterpair.second) {
+    const ParamEntry *testEntry = (*iterpair.first).getParamEntry();
+    if (testEntry->getMinSize() <= size && testEntry->justifiedContain(loc, size)==0)
+      return 1;
+    if (testEntry->containedBy(loc, size))
+      res = 2;
+    ++iterpair.first;
+  }
+  if (res != 2 && iterpair.first != resolver->end()) {
+    iterpair.second = resolver->find_end(loc.getOffset() + (size-1));
+    while(iterpair.first != iterpair.second) {
+      const ParamEntry *testEntry = (*iterpair.first).getParamEntry();
+      if (testEntry->containedBy(loc, size)) {
+	res = 2;
+	break;
+      }
+      ++iterpair.first;
+    }
+  }
+  return res;
 }
 
 /// Given the next data-type and the status of previously allocated slots,
@@ -437,17 +510,19 @@ int4 ParamListStandard::findEntry(const Address &loc,int4 size) const
 Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    int4 grp = entry[i].getGroup();
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    const ParamEntry &curEntry( *iter );
+    int4 grp = curEntry.getGroup();
     if (status[grp]<0) continue;
-    if ((entry[i].getType() != TYPE_UNKNOWN)&&
-	tp->getMetatype() != entry[i].getType())
+    if ((curEntry.getType() != TYPE_UNKNOWN)&&
+	tp->getMetatype() != curEntry.getType())
       continue;			// Wrong type
 
-    Address res = entry[i].getAddrBySlot(status[grp],tp->getSize());
+    Address res = curEntry.getAddrBySlot(status[grp],tp->getSize());
     if (res.isInvalid()) continue; // If -tp- doesn't fit an invalid address is returned
-    if (entry[i].isExclusion()) {
-      int4 maxgrp = grp + entry[i].getGroupSize();
+    if (curEntry.isExclusion()) {
+      int4 maxgrp = grp + curEntry.getGroupSize();
       for(int4 j=grp;j<maxgrp;++j) // For an exclusion entry
 	status[j] = -1;		// some number of groups are taken up
     }
@@ -475,7 +550,7 @@ void ParamListStandard::assignMap(const vector<Datatype *> &proto,bool isinput,T
 	// Assume datatype is stored elsewhere and only the pointer is passed
 	AddrSpace *spc = spacebase;
 	if (spc == (AddrSpace *)0)
-	  spc = typefactory.getArch()->getDefaultSpace();
+	  spc = typefactory.getArch()->getDefaultDataSpace();
 	int4 pointersize = spc->getAddrSize();
 	int4 wordsize = spc->getWordSize();
 	Datatype *pointertp = typefactory.getTypePointerAbsolute(pointersize,proto[i],wordsize);
@@ -517,27 +592,26 @@ void ParamListStandard::buildTrialMap(ParamActive *active) const
 
   for(int4 i=0;i<active->getNumTrials();++i) {
     ParamTrial &paramtrial(active->getTrial(i));
-    int4 entslot = findEntry(paramtrial.getAddress(),paramtrial.getSize());
+    const ParamEntry *entrySlot = findEntry(paramtrial.getAddress(),paramtrial.getSize());
     // Note: if a trial is "definitely not used" but there is a matching entry,
     // we still include it in the map
-    if (entslot == -1)
+    if (entrySlot == (const ParamEntry *)0)
       paramtrial.markNoUse();
     else {
-      const ParamEntry *curentry = &(entry[entslot]);
-      paramtrial.setEntry( curentry, 0 ); // Keep track of entry recovered for this trial
+      paramtrial.setEntry( entrySlot, 0 ); // Keep track of entry recovered for this trial
 
-      if (curentry->getType() == TYPE_FLOAT)
+      if (entrySlot->getType() == TYPE_FLOAT)
 	seenfloattrial = true;
       else
 	seeninttrial = true;
 
       // Make sure we list that the entries group is marked
-      int4 grp = curentry->getGroup();
+      int4 grp = entrySlot->getGroup();
       while(hitlist.size() <= grp)
 	hitlist.push_back((const ParamEntry *)0);
       const ParamEntry *lastentry = hitlist[grp];
       if (lastentry == (const ParamEntry *)0)
-	hitlist[grp] = curentry; // This is the first hit for this group
+	hitlist[grp] = entrySlot; // This is the first hit for this group
     }
   }
 
@@ -548,8 +622,9 @@ void ParamListStandard::buildTrialMap(ParamActive *active) const
     const ParamEntry *curentry = hitlist[i];
     
     if (curentry == (const ParamEntry *)0) {
-      for(int4 j=0;j<entry.size();++j) {
-	curentry = &entry[j];
+      list<ParamEntry>::const_iterator iter;
+      for(iter=entry.begin();iter!=entry.end();++iter) {
+	curentry = &(*iter);
 	if (curentry->getGroup() == i) break; // Find first entry of the missing group
       }
       if ((!seenfloattrial)&&(curentry->getType()==TYPE_FLOAT))
@@ -749,10 +824,40 @@ void ParamListStandard::calcDelay(void)
 
 {
   maxdelay = 0;
-  for(int4 i=0;i<entry.size();++i) {
-    int4 delay = entry[i].getSpace()->getDelay();
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    int4 delay = (*iter).getSpace()->getDelay();
     if (delay > maxdelay)
       maxdelay = delay;
+  }
+}
+
+/// Enter all the ParamEntry objects into an interval map (based on address space)
+void ParamListStandard::populateResolver(void)
+
+{
+  int4 maxid = -1;
+  list<ParamEntry>::iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    int4 id = (*iter).getSpace()->getIndex();
+    if (id > maxid)
+      maxid = id;
+  }
+  resolverMap.resize(maxid+1, (ParamEntryResolver *)0);
+  int4 position = 0;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    ParamEntry *paramEntry = &(*iter);
+    int4 spaceId = paramEntry->getSpace()->getIndex();
+    ParamEntryResolver *resolver = resolverMap[spaceId];
+    if (resolver == (ParamEntryResolver *)0) {
+      resolver = new ParamEntryResolver();
+      resolverMap[spaceId] = resolver;
+    }
+    uintb first = paramEntry->getBase();
+    uintb last = first + (paramEntry->getSize() - 1);
+    ParamEntryResolver::inittype initData(position,paramEntry);
+    position += 1;
+    resolver->insert(initData,first,last);
   }
 }
 
@@ -782,25 +887,24 @@ void ParamListStandard::fillinMap(ParamActive *active) const
 bool ParamListStandard::checkJoin(const Address &hiaddr,int4 hisize,const Address &loaddr,int4 losize) const
 
 {
-  int4 enthi = findEntry(hiaddr,hisize);
-  if (enthi < 0) return false;
-  int4 entlo = findEntry(loaddr,losize);
-  if (entlo < 0) return false;
-  const ParamEntry &entryhi( entry[ enthi ] );
-  const ParamEntry &entrylo( entry[ entlo ] );
-  if (entryhi.getGroup() == entrylo.getGroup()) {
-    if (entryhi.isExclusion()||entrylo.isExclusion()) return false;
+  const ParamEntry *entryHi = findEntry(hiaddr,hisize);
+  if (entryHi == (const ParamEntry *)0) return false;
+  const ParamEntry *entryLo = findEntry(loaddr,losize);
+  if (entryLo == (const ParamEntry *)0) return false;
+  if (entryHi->getGroup() == entryLo->getGroup()) {
+    if (entryHi->isExclusion()||entryLo->isExclusion()) return false;
     if (!hiaddr.isContiguous(hisize,loaddr,losize)) return false;
-    if ((hiaddr.getOffset() % entryhi.getAlign()) != 0) return false;
-    if ((loaddr.getOffset() % entrylo.getAlign()) != 0) return false;
+    if (((hiaddr.getOffset() - entryHi->getBase()) % entryHi->getAlign()) != 0) return false;
+    if (((loaddr.getOffset() - entryLo->getBase()) % entryLo->getAlign()) != 0) return false;
     return true;
   }
   else {
     int4 sizesum = hisize + losize;
-    for(int4 i=0;i<entry.size();++i) {
-      if (entry[i].getSize() < sizesum) continue;
-      if (entry[i].justifiedContain(loaddr,losize)!=0) continue;
-      if (entry[i].justifiedContain(hiaddr,hisize)!=losize) continue;
+    list<ParamEntry>::const_iterator iter;
+    for(iter=entry.begin();iter!=entry.end();++iter) {
+      if ((*iter).getSize() < sizesum) continue;
+      if ((*iter).justifiedContain(loaddr,losize)!=0) continue;
+      if ((*iter).justifiedContain(hiaddr,hisize)!=losize) continue;
       return true;
     }
   }
@@ -812,44 +916,77 @@ bool ParamListStandard::checkSplit(const Address &loc,int4 size,int4 splitpoint)
 {
   Address loc2 = loc + splitpoint;
   int4 size2 = size - splitpoint;
-  int4 entnum = findEntry(loc,splitpoint);
-  if (entnum == -1) return false;
-  entnum = findEntry(loc2,size2);
-  if (entnum == -1) return false;
+  const ParamEntry *entryNum = findEntry(loc,splitpoint);
+  if (entryNum == (const ParamEntry *)0) return false;
+  entryNum = findEntry(loc2,size2);
+  if (entryNum == (const ParamEntry *)0) return false;
   return true;
 }
 
 bool ParamListStandard::possibleParam(const Address &loc,int4 size) const
 
 {
-  return (-1 != findEntry(loc,size));
+  return ((const ParamEntry *)0 != findEntry(loc,size));
 }
 
 bool ParamListStandard::possibleParamWithSlot(const Address &loc,int4 size,int4 &slot,int4 &slotsize) const
 
 {
-  int4 num = findEntry(loc,size);
-  if (num == -1) return false;
-  const ParamEntry &curentry( entry[num] );
-  slot = curentry.getSlot(loc,0);
-  if (curentry.isExclusion()) {
-    slotsize = curentry.getGroupSize();
+  const ParamEntry *entryNum = findEntry(loc,size);
+  if (entryNum == (const ParamEntry *)0) return false;
+  slot = entryNum->getSlot(loc,0);
+  if (entryNum->isExclusion()) {
+    slotsize = entryNum->getGroupSize();
   }
   else {
-    slotsize = ((size-1) / curentry.getAlign()) + 1;
+    slotsize = ((size-1) / entryNum->getAlign()) + 1;
   }
   return true;
+}
+
+bool ParamListStandard::getBiggestContainedParam(const Address &loc,int4 size,VarnodeData &res) const
+
+{
+  int4 index = loc.getSpace()->getIndex();
+  if (index >= resolverMap.size())
+    return false;
+  ParamEntryResolver *resolver = resolverMap[index];
+  if (resolver == (ParamEntryResolver *)0)
+    return false;
+  const ParamEntry *maxEntry = (const ParamEntry *)0;
+  ParamEntryResolver::const_iterator iter = resolver->find_begin(loc.getOffset());
+  ParamEntryResolver::const_iterator enditer = resolver->find_end(loc.getOffset() + (size-1));
+  while(iter != enditer) {
+    const ParamEntry *testEntry = (*iter).getParamEntry();
+    ++iter;
+    if (testEntry->containedBy(loc, size)) {
+      if (maxEntry == (const ParamEntry *)0)
+	maxEntry = testEntry;
+      else if (testEntry->getSize() > maxEntry->getSize())
+	maxEntry = testEntry;
+    }
+  }
+  if (!maxEntry->isExclusion())
+    return false;
+  if (maxEntry != (const ParamEntry *)0) {
+    res.space = maxEntry->getSpace();
+    res.offset = maxEntry->getBase();
+    res.size = maxEntry->getSize();
+    return true;
+  }
+  return false;
 }
 
 bool ParamListStandard::unjustifiedContainer(const Address &loc,int4 size,VarnodeData &res) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    if (entry[i].getMinSize() > size) continue;
-    int4 just = entry[i].justifiedContain(loc,size);
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    if ((*iter).getMinSize() > size) continue;
+    int4 just = (*iter).justifiedContain(loc,size);
     if (just < 0) continue;
     if (just == 0) return false;
-    entry[i].getContainer(loc,size,res);
+    (*iter).getContainer(loc,size,res);
     return true;
   }
   return false;
@@ -858,9 +995,10 @@ bool ParamListStandard::unjustifiedContainer(const Address &loc,int4 size,Varnod
 OpCode ParamListStandard::assumedExtension(const Address &addr,int4 size,VarnodeData &res) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    if (entry[i].getMinSize() > size) continue;
-    OpCode ext = entry[i].assumedExtension(addr,size,res);
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    if ((*iter).getMinSize() > size) continue;
+    OpCode ext = (*iter).assumedExtension(addr,size,res);
     if (ext != CPUI_COPY)
       return ext;
   }
@@ -870,11 +1008,11 @@ OpCode ParamListStandard::assumedExtension(const Address &addr,int4 size,Varnode
 void ParamListStandard::getRangeList(AddrSpace *spc,RangeList &res) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    const ParamEntry &pentry( entry[i] );
-    if (pentry.getSpace() != spc) continue;
-    uintb baseoff = pentry.getBase();
-    uintb endoff = baseoff + pentry.getSize() - 1;
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    if ((*iter).getSpace() != spc) continue;
+    uintb baseoff = (*iter).getBase();
+    uintb endoff = baseoff + (*iter).getSize() - 1;
     res.insertRange(spc,baseoff,endoff);
   }
 }
@@ -932,6 +1070,7 @@ void ParamListStandard::restoreXml(const Element *el,const AddrSpaceManager *man
     }
   }
   calcDelay();
+  populateResolver();
 }
 
 ParamList *ParamListStandard::clone(void) const
@@ -957,7 +1096,7 @@ void ParamListStandardOut::assignMap(const vector<Datatype *> &proto,bool isinpu
   if (res.back().addr.isInvalid()) { // Could not assign an address (too big)
     AddrSpace *spc = spacebase;
     if (spc == (AddrSpace *)0)
-      spc = typefactory.getArch()->getDefaultSpace();
+      spc = typefactory.getArch()->getDefaultDataSpace();
     int4 pointersize = spc->getAddrSize();
     int4 wordsize = spc->getWordSize();
     Datatype *pointertp = typefactory.getTypePointerAbsolute(pointersize, proto[0], wordsize);
@@ -978,13 +1117,14 @@ void ParamListStandardOut::fillinMap(ParamActive *active) const
 
 {
   if (active->getNumTrials() == 0) return; // No trials to check
-  int4 bestentry = -1;
+  const ParamEntry *bestentry = (const ParamEntry *)0;
   int4 bestcover = 0;
   type_metatype bestmetatype = TYPE_PTR;
 
   // Find entry which is best covered by the active trials
-  for(int4 i=0;i<entry.size();++i) {
-    const ParamEntry *curentry = &(entry[i]);
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    const ParamEntry *curentry = &(*iter);
     bool putativematch = false;
     for(int4 j=0;j<active->getNumTrials();++j) { // Evaluate all trials in terms of current ParamEntry
       ParamTrial &paramtrial(active->getTrial(j));
@@ -1022,24 +1162,23 @@ void ParamListStandardOut::fillinMap(ParamActive *active) const
     // Prefer a more generic type restriction if we have it
     // prefer the larger coverage
     if ((k==active->getNumTrials())&&((curentry->getType() > bestmetatype)||(offmatch > bestcover))) {
-      bestentry = i;
+      bestentry = curentry;
       bestcover = offmatch;
       bestmetatype = curentry->getType();
     }
   }
-  if (bestentry==-1) {
+  if (bestentry==(const ParamEntry *)0) {
     for(int4 i=0;i<active->getNumTrials();++i)
       active->getTrial(i).markNoUse();
   }
   else {
-    const ParamEntry *curentry = &(entry[bestentry]);
     for(int4 i=0;i<active->getNumTrials();++i) {
       ParamTrial &paramtrial(active->getTrial(i));
       if (paramtrial.isActive()) {
-	int4 res = curentry->justifiedContain(paramtrial.getAddress(),paramtrial.getSize());
+	int4 res = bestentry->justifiedContain(paramtrial.getAddress(),paramtrial.getSize());
 	if (res >= 0) {
 	  paramtrial.markUsed(); // Only actives are ever marked used
-	  paramtrial.setEntry(curentry,res);
+	  paramtrial.setEntry(bestentry,res);
 	}
 	else {
 	  paramtrial.markNoUse();
@@ -1058,8 +1197,9 @@ void ParamListStandardOut::fillinMap(ParamActive *active) const
 bool ParamListStandardOut::possibleParam(const Address &loc,int4 size) const
 
 {
-  for(int4 i=0;i<entry.size();++i) {
-    if (entry[i].justifiedContain(loc,size)>=0)
+  list<ParamEntry>::const_iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter) {
+    if ((*iter).justifiedContain(loc,size)>=0)
       return true;
   }
   return false;
@@ -1070,8 +1210,9 @@ void ParamListStandardOut::restoreXml(const Element *el,const AddrSpaceManager *
 {
   ParamListStandard::restoreXml(el,manage,effectlist,normalstack);
   // Check for double precision entries
-  for(int4 i=0;i<entry.size();++i)
-    entry[i].extraChecks(entry);
+  list<ParamEntry>::iterator iter;
+  for(iter=entry.begin();iter!=entry.end();++iter)
+    (*iter).extraChecks(entry);
 }
 
 ParamList *ParamListStandardOut::clone(void) const
@@ -1089,12 +1230,11 @@ void ParamListRegister::fillinMap(ParamActive *active) const
   // Mark anything active as used
   for(int4 i=0;i<active->getNumTrials();++i) {
     ParamTrial &paramtrial(active->getTrial(i));
-    int4 entslot = findEntry(paramtrial.getAddress(),paramtrial.getSize());
-    if (entslot == -1)		// There may be no matching entry (if the model was recovered late)
+    const ParamEntry *entrySlot = findEntry(paramtrial.getAddress(),paramtrial.getSize());
+    if (entrySlot == (const ParamEntry *)0)	// There may be no matching entry (if the model was recovered late)
       paramtrial.markNoUse();
     else {
-      const ParamEntry *curentry = &(entry[entslot]);
-      paramtrial.setEntry( curentry,0 ); // Keep track of entry recovered for this trial
+      paramtrial.setEntry( entrySlot,0 ); // Keep track of entry recovered for this trial
       if (paramtrial.isActive())
 	paramtrial.markUsed();
     }
@@ -1123,30 +1263,31 @@ void ParamListMerged::foldIn(const ParamListStandard &op2)
   }
   if ((spacebase != op2.getSpacebase())&&(op2.getSpacebase() != (AddrSpace *)0))
     throw LowlevelError("Cannot merge prototype models with different stacks");
-  
-  for(int4 i=0;i<op2.getEntry().size();++i) {
-    const ParamEntry &opentry( op2.getEntry()[i] );
-    int4 j;
+
+  list<ParamEntry>::const_iterator iter2;
+  for(iter2=op2.getEntry().begin();iter2!=op2.getEntry().end();++iter2) {
+    const ParamEntry &opentry( *iter2 );
     int4 typeint = 0;
-    for(j=0;j<entry.size();++j) {
-      if (entry[j].contains(opentry)) {
+    list<ParamEntry>::iterator iter;
+    for(iter=entry.begin();iter!=entry.end();++iter) {
+      if ((*iter).contains(opentry)) {
 	typeint = 2;
 	break;
       }
-      if (opentry.contains( entry[j] )) {
+      if (opentry.contains( *iter )) {
 	typeint = 1;
 	break;
       }
     }
     if (typeint==2) {
-      if (entry[j].getMinSize() != opentry.getMinSize())
+      if ((*iter).getMinSize() != opentry.getMinSize())
 	typeint = 0;
     }
     else if (typeint == 1) {
-      if (entry[j].getMinSize() != opentry.getMinSize())
+      if ((*iter).getMinSize() != opentry.getMinSize())
 	typeint = 0;
       else
-	entry[j] = opentry;	// Replace with the containing entry
+	*iter = opentry;	// Replace with the containing entry
     }
     if (typeint == 0)
       entry.push_back(opentry);
@@ -2114,6 +2255,8 @@ void ProtoModelMerged::restoreXml(const Element *el)
     foldIn(mymodel);
     modellist.push_back(mymodel);
   }
+  ((ParamListMerged *)input)->finalize();
+  ((ParamListMerged *)output)->finalize();
 }
 
 void ParameterBasic::setTypeLock(bool val)
@@ -2335,14 +2478,7 @@ ProtoParameter *ProtoStoreSymbol::setInput(int4 i, const string &nm,const Parame
   if (res->sym == (Symbol *)0) {
     if (scope->discoverScope(pieces.addr,pieces.type->getSize(),usepoint) != scope)
       usepoint = restricted_usepoint; 
-    string name;
-    if (nm.size()==0) {
-      int4 index = i+1;
-      name = scope->buildVariableName(pieces.addr,usepoint,pieces.type,index,Varnode::input);
-    }
-    else
-      name = nm;
-    res->sym = scope->addSymbol(name,pieces.type,pieces.addr,usepoint)->getSymbol();
+    res->sym = scope->addSymbol(nm,pieces.type,pieces.addr,usepoint)->getSymbol();
     scope->setCategory(res->sym,0,i);
     if ((pieces.flags & (Varnode::indirectstorage|Varnode::hiddenretparm)) != 0)
       scope->setAttribute(res->sym,pieces.flags & (Varnode::indirectstorage|Varnode::hiddenretparm));
@@ -2788,6 +2924,7 @@ FuncProto::FuncProto(void)
   store = (ProtoStore *)0;
   flags = 0;
   injectid = -1;
+  returnBytesConsumed = 0;
 }
 
 /// \param op2 is the other function prototype to copy into \b this
@@ -2959,6 +3096,19 @@ void FuncProto::setOutputLock(bool val)
   store->getOutput()->setTypeLock(val);
 }
 
+/// This value can be used as a hint as to how much of the return value is important and
+/// is used to inform the dead code \e consume algorithm.
+/// \param val is the estimated number of bytes or 0
+/// \return \b true if the value was changed
+bool FuncProto::setReturnBytesConsumed(int4 val)
+
+{
+  int4 oldVal = returnBytesConsumed;
+  if (oldVal == 0 || val < oldVal)
+    returnBytesConsumed = val;
+  return (oldVal != val);
+}
+
 /// \brief Assuming \b this prototype is locked, calculate the \e extrapop
 ///
 /// If \e extrapop is unknown and \b this prototype is locked, try to directly
@@ -3006,6 +3156,7 @@ void FuncProto::clearUnlockedOutput(void)
   }
   else
     store->clearOutput();
+  returnBytesConsumed = 0;
 }
 
 void FuncProto::clearInput(void)
@@ -3239,6 +3390,44 @@ const VarnodeData &FuncProto::getLikelyTrash(int4 i) const
   return likelytrash[i];
 }
 
+/// \brief Decide whether a given storage location could be, or could hold, an input parameter
+///
+/// If the input is locked, check if the location overlaps one of the current parameters.
+/// Otherwise, check if the location overlaps an entry in the prototype model.
+/// Return:
+///   - 0 if the location neither contains or is contained by a parameter storage location
+///   - 1 if the location is contained by a parameter storage location
+///   - 2 if the location contains a parameter storage location
+/// \param addr is the starting address of the given storage location
+/// \param size is the number of bytes in the storage
+/// \return the characterization code
+int4 FuncProto::characterizeAsInputParam(const Address &addr,int4 size) const
+
+{
+  if (!isDotdotdot()) {		// If the proto is varargs, go straight to the model
+    if ((flags&voidinputlock)!=0) return 0;
+    int4 num = numParams();
+    if (num > 0) {
+      bool locktest = false;	// Have tested against locked symbol
+      int4 characterCode = 0;
+      for(int4 i=0;i<num;++i) {
+	ProtoParameter *param = getParam(i);
+	if (!param->isTypeLocked()) continue;
+	locktest = true;
+	Address iaddr = param->getAddress();
+	// If the parameter already exists, the varnode must be justified in the parameter relative
+	// to the endianness of the space, irregardless of the forceleft flag
+	if (iaddr.justifiedContain(param->getSize(),addr,size,false)==0)
+	  return 1;
+	if (iaddr.containedBy(param->getSize(), addr, size))
+	  characterCode = 2;
+      }
+      if (locktest) return characterCode;
+    }
+  }
+  return model->characterizeAsInputParam(addr, size);
+}
+
 /// \brief Decide whether a given storage location could be an input parameter
 ///
 /// If the input is locked, check if the location matches one of the current parameters.
@@ -3334,6 +3523,41 @@ bool FuncProto::unjustifiedInputParam(const Address &addr,int4 size,VarnodeData 
     }
   }
   return model->unjustifiedInputParam(addr,size,res);
+}
+
+/// \brief Pass-back the biggest input parameter contained within the given range
+///
+/// \param loc is the starting address of the given range
+/// \param size is the number of bytes in the range
+/// \param res will hold the parameter storage description being passed back
+/// \return \b true if there is at least one parameter contained in the range
+bool FuncProto::getBiggestContainedInputParam(const Address &loc,int4 size,VarnodeData &res) const
+
+{
+  if (!isDotdotdot()) {		// If the proto is varargs, go straight to the model
+    if ((flags&voidinputlock)!=0) return false;
+    int4 num = numParams();
+    if (num > 0) {
+      bool locktest = false;	// Have tested against locked symbol
+      res.size = 0;
+      for(int4 i=0;i<num;++i) {
+	ProtoParameter *param = getParam(i);
+	if (!param->isTypeLocked()) continue;
+	locktest = true;
+	Address iaddr = param->getAddress();
+	if (iaddr.containedBy(param->getSize(), loc, size)) {
+	  if (param->getSize() > res.size) {
+	    res.space = iaddr.getSpace();
+	    res.offset = iaddr.getOffset();
+	    res.size = param->getSize();
+	  }
+	}
+      }
+      if (locktest)
+	return (res.size == 0);
+    }
+  }
+  return model->getBiggestContainedInputParam(loc,size,res);
 }
 
 /// \brief Decide if \b this can be safely restricted to match another prototype
@@ -3890,6 +4114,7 @@ int4 FuncCallSpecs::transferLockedInputParam(ProtoParameter *param)
     if (startaddr < curtrial.getAddress()) continue;
     Address trialend = curtrial.getAddress() + (curtrial.getSize() - 1);
     if (trialend < lastaddr) continue;
+    if (curtrial.isDefinitelyNotUsed()) return 0;	// Trial has already been stripped
     return curtrial.getSlot();
   }
   if (startaddr.getSpace()->getType() == IPTR_SPACEBASE)
@@ -4258,6 +4483,8 @@ void FuncCallSpecs::deindirect(Funcdata &data,Funcdata *newfd)
   Varnode *vn = data.newVarnodeCallSpecs(this);
   data.opSetInput(op,vn,0);
   data.opSetOpcode(op,CPUI_CALL);
+  if (isOverride())	// If we are overridden at the call-site
+    return;		// Don't use the discovered function prototype
 
   // Try our best to merge existing prototype
   // with the one we have just been handed
@@ -4645,6 +4872,42 @@ void FuncCallSpecs::buildOutputFromTrials(Funcdata &data,vector<Varnode *> &tria
     if (in1 != (Varnode *)0)
       data.deleteVarnode(in1);
   }
+}
+
+/// \brief Get the estimated number of bytes within the given parameter that are consumed
+///
+/// As a function is decompiled, there may hints about how many of the bytes, within the
+/// storage location used to pass the parameter, are used by \b this sub-function. A non-zero
+/// value means that that many least significant bytes of the storage location are used. A value
+/// of zero means all bytes are presumed used.
+/// \param slot is the slot of the given input parameter
+/// \return the number of bytes used (or 0)
+int4 FuncCallSpecs::getInputBytesConsumed(int4 slot) const
+
+{
+  if (slot >= inputConsume.size())
+    return 0;
+  return inputConsume[slot];
+}
+
+/// \brief Set the estimated number of bytes within the given parameter that are consumed
+///
+/// This provides a hint to the dead code \e consume algorithm, while examining the calling
+/// function, about how the given parameter within the subfunction is used.
+/// A non-zero value means that that many least significant bytes of the storage location
+/// are used. A value of zero means all bytes are presumed used.
+/// \param slot is the slot of the given input parameter
+/// \param val is the number of bytes consumed (or 0)
+/// \return \b true if there was a change in the estimate
+bool FuncCallSpecs::setInputBytesConsumed(int4 slot,int4 val) const
+
+{
+  while(inputConsume.size() <= slot)
+    inputConsume.push_back(0);
+  int4 oldVal = inputConsume[slot];
+  if (oldVal == 0 || val < oldVal)
+    inputConsume[slot] = val;
+  return (oldVal != val);
 }
 
 /// \brief Prepend any extra parameters if a paramshift is required

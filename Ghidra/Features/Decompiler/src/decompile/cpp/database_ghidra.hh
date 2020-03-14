@@ -88,9 +88,8 @@ public:
   virtual Funcdata *resolveExternalRefFunction(ExternRefSymbol *sym) const;
 
   virtual SymbolEntry *findOverlap(const Address &addr,int4 size) const { throw LowlevelError("findOverlap unimplemented"); }
-  virtual SymbolEntry *findBefore(const Address &addr) const { throw LowlevelError("findBefore unimplemented"); }
-  virtual SymbolEntry *findAfter(const Address &addr) const { throw LowlevelError("findAfter unimplemented"); }
   virtual void findByName(const string &name,vector<Symbol *> &res) const { throw LowlevelError("findByName unimplemented"); }
+  virtual bool isNameUsed(const string &name) const { throw LowlevelError("isNameUsed unimplemented"); }
 
   virtual MapIterator begin(void) const { throw LowlevelError("begin unimplemented"); }
   virtual MapIterator end(void) const { throw LowlevelError("end unimplemented"); }
@@ -102,6 +101,7 @@ public:
   virtual void clearUnlockedCategory(int4 cat) { throw LowlevelError("clearUnlockedCategory unimplemented"); }
   virtual void clearUnlocked(void) { throw LowlevelError("clearUnlocked unimplemented"); }
   virtual void restrictScope(Funcdata *f) { throw LowlevelError("restrictScope unimplemented"); }
+  virtual void removeSymbolMappings(Symbol *symbol) { throw LowlevelError("removeSymbolMappings unimplemented"); }
   virtual void removeSymbol(Symbol *symbol) { throw LowlevelError("removeSymbol unimplemented"); }
   virtual void renameSymbol(Symbol *sym,const string &newname) { throw LowlevelError("renameSymbol unimplemented"); }
   virtual void retypeSymbol(Symbol *sym,Datatype *ct) { throw LowlevelError("retypeSymbol unimplemented"); }
